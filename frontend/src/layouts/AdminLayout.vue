@@ -12,7 +12,6 @@ import {
   HomeFilled,
   Key,
   Menu as MenuIcon,
-  Plus,
   Setting,
   SwitchButton,
   User,
@@ -37,8 +36,7 @@ const menuGroups = computed(() => [
     label: '工作台',
     items: [
       { path: '/dashboard', label: '仪表盘', icon: HomeFilled },
-      { path: '/buy', label: '购买号码', icon: Plus },
-      { path: '/orders', label: '号码订单', icon: Cellphone },
+      { path: '/buy', label: '号码管理', icon: Cellphone },
     ],
   },
   {

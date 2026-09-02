@@ -296,8 +296,43 @@ func (s *Postgres) ReplaceCatalog(ctx context.Context, pid, kind string, items [
 			return err
 		}
 	}
+	// 目录刷新后仅补齐缺少快照的历史订单。已有名称必须保持不变，
+	// 避免上游改名导致历史订单展示漂移。
+	if _, err = tx.Exec(ctx, backfillOrderNamesSQL, pid); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
+
+const upsertCatalogItemSQL = `
+INSERT INTO provider_catalog(provider_id,kind,code,country,name,price,stock,raw,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())
+ON CONFLICT(provider_id,kind,code,country) DO UPDATE SET
+    name=EXCLUDED.name,
+    price=COALESCE(EXCLUDED.price,provider_catalog.price),
+    stock=COALESCE(EXCLUDED.stock,provider_catalog.stock),
+    raw=EXCLUDED.raw,
+    updated_at=now()`
+
+// UpsertCatalog 保存筛选目录中的可读名称，但不删除未出现在本次筛选
+// 结果中的目录项，避免不同服务或档位的请求互相覆盖。
+func (s *Postgres) UpsertCatalog(ctx context.Context, pid string, items []domain.CatalogItem) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, x := range items {
+		if _, err = tx.Exec(ctx, upsertCatalogItemSQL, pid, x.Kind, x.Code, x.Country, x.Name, x.Price, x.Stock, x.Raw); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, backfillOrderNamesSQL, pid); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Postgres) ListCatalog(ctx context.Context, pid, kind, country string) ([]domain.CatalogItem, error) {
 	rows, err := s.pool.Query(ctx, `SELECT provider_id,kind,code,country,name,price,stock,raw,updated_at FROM provider_catalog WHERE provider_id=$1 AND kind=$2 AND ($3='' OR country=$3 OR country='') ORDER BY name`, pid, kind, country)
 	if err != nil {
@@ -315,15 +350,112 @@ func (s *Postgres) ListCatalog(ctx context.Context, pid, kind, country string) (
 	return out, rows.Err()
 }
 
+const backfillOrderNamesSQL = `
+UPDATE orders AS o
+SET country_name = CASE
+        WHEN NULLIF(BTRIM(o.country_name), '') IS NULL THEN COALESCE((
+            SELECT pc.name
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'country'
+              AND pc.code = o.country_code
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+            ORDER BY (pc.country = '') DESC, pc.updated_at DESC, pc.name
+            LIMIT 1
+        ), o.country_name)
+        ELSE o.country_name
+    END,
+    service_name = CASE
+        WHEN NULLIF(BTRIM(o.service_name), '') IS NULL THEN COALESCE((
+            SELECT pc.name
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'service'
+              AND pc.code = o.service_code
+              AND pc.country IN (o.country_code, '')
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+            ORDER BY (pc.country = o.country_code) DESC, pc.updated_at DESC, pc.name
+            LIMIT 1
+        ), o.service_name)
+        ELSE o.service_name
+    END
+WHERE o.provider_id = $1
+  AND (
+      (
+          NULLIF(BTRIM(o.country_name), '') IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM provider_catalog AS pc
+              WHERE pc.provider_id = o.provider_id
+                AND pc.kind = 'country'
+                AND pc.code = o.country_code
+                AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+          )
+      )
+      OR (
+          NULLIF(BTRIM(o.service_name), '') IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM provider_catalog AS pc
+              WHERE pc.provider_id = o.provider_id
+                AND pc.kind = 'service'
+                AND pc.code = o.service_code
+                AND pc.country IN (o.country_code, '')
+                AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+          )
+      )
+  )`
+
+const insertOrderSQL = `
+INSERT INTO orders(
+    id,user_id,provider_id,upstream_id,phone_number,
+    country_code,country_name,service_code,service_name,quality_tier,
+    status,cost,currency,can_get_another_sms,next_poll_at,expires_at
+)
+SELECT
+    $1,$2,$3,$4,$5,
+    $6,
+    COALESCE(NULLIF(BTRIM($7), ''), (
+        SELECT pc.name
+        FROM provider_catalog AS pc
+        WHERE pc.provider_id = $3
+          AND pc.kind = 'country'
+          AND pc.code = $6
+          AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        ORDER BY (pc.country = '') DESC, pc.updated_at DESC, pc.name
+        LIMIT 1
+    ), ''),
+    $8,
+    COALESCE(NULLIF(BTRIM($9), ''), (
+        SELECT pc.name
+        FROM provider_catalog AS pc
+        WHERE pc.provider_id = $3
+          AND pc.kind = 'service'
+          AND pc.code = $8
+          AND pc.country IN ($6, '')
+          AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        ORDER BY (pc.country = $6) DESC, pc.updated_at DESC, pc.name
+        LIMIT 1
+    ), ''),
+    $10,$11,$12,$13,$14,$15,$16`
+
+func orderInsertArgs(o domain.Order) []any {
+	return []any{
+		o.ID, o.UserID, o.ProviderID, o.UpstreamID, o.PhoneNumber,
+		o.CountryCode, o.CountryName, o.ServiceCode, o.ServiceName, o.QualityTier,
+		o.Status, o.Cost, o.Currency, o.CanGetAnotherSMS, o.NextPollAt, o.ExpiresAt,
+	}
+}
+
 func (s *Postgres) CreateOrder(ctx context.Context, o domain.Order) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO orders(id,user_id,provider_id,upstream_id,phone_number,country_code,service_code,status,cost,currency,can_get_another_sms,next_poll_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, o.ID, o.UserID, o.ProviderID, o.UpstreamID, o.PhoneNumber, o.CountryCode, o.ServiceCode, o.Status, o.Cost, o.Currency, o.CanGetAnotherSMS, o.NextPollAt, o.ExpiresAt)
+	_, err := s.pool.Exec(ctx, insertOrderSQL, orderInsertArgs(o)...)
 	if unique(err) {
 		return ErrConflict
 	}
 	return err
 }
 func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (PurchaseRecord, bool, error) {
-	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,max_price,status) VALUES($1,$2,$3,$4,$5,$6,$7,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.MaxPrice)
+	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,max_price,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.QualityTier, r.MaxPrice)
 	if err != nil {
 		return PurchaseRecord{}, false, err
 	}
@@ -332,16 +464,69 @@ func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (Purch
 		return r, true, nil
 	}
 	var existing PurchaseRecord
-	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,max_price::float8,status,COALESCE(order_id::text,'') FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.MaxPrice, &existing.Status, &existing.OrderID)
+	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,max_price::float8,status,COALESCE(order_id::text,''),COALESCE(error_code,''),created_at,updated_at FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.QualityTier, &existing.MaxPrice, &existing.Status, &existing.OrderID, &existing.ErrorCode, &existing.CreatedAt, &existing.UpdatedAt)
 	return existing, false, err
 }
+
+const listPurchaseRequestsSQL = `SELECT
+    pr.id,pr.user_id,pr.idempotency_key,pr.provider_id,
+    pr.country_code,
+    COALESCE((
+        SELECT pc.name
+        FROM provider_catalog AS pc
+        WHERE pc.provider_id = pr.provider_id
+          AND pc.kind = 'country'
+          AND pc.code = pr.country_code
+          AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        ORDER BY (pc.country = '') DESC,pc.updated_at DESC,pc.country,pc.name
+        LIMIT 1
+    ),''),
+    pr.service_code,
+    COALESCE((
+        SELECT pc.name
+        FROM provider_catalog AS pc
+        WHERE pc.provider_id = pr.provider_id
+          AND pc.kind = 'service'
+          AND pc.code = pr.service_code
+          AND pc.country IN (pr.country_code,'')
+          AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        ORDER BY (pc.country = pr.country_code) DESC,pc.updated_at DESC,pc.country,pc.name
+        LIMIT 1
+    ),''),
+    pr.quality_tier,pr.max_price::float8,pr.status,
+    COALESCE(pr.order_id::text,''),COALESCE(pr.error_code,''),pr.created_at,pr.updated_at
+FROM purchase_requests AS pr
+WHERE pr.user_id=$1
+ORDER BY pr.created_at DESC,pr.id DESC
+LIMIT $2`
+
+func (s *Postgres) ListPurchaseRequests(ctx context.Context, userID string, limit int) ([]PurchaseRecord, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rows, err := s.pool.Query(ctx, listPurchaseRequestsSQL, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := make([]PurchaseRecord, 0, limit)
+	for rows.Next() {
+		var record PurchaseRecord
+		if err = rows.Scan(&record.ID, &record.UserID, &record.IdempotencyKey, &record.ProviderID, &record.CountryCode, &record.CountryName, &record.ServiceCode, &record.ServiceName, &record.QualityTier, &record.MaxPrice, &record.Status, &record.OrderID, &record.ErrorCode, &record.CreatedAt, &record.UpdatedAt); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 func (s *Postgres) CompletePurchase(ctx context.Context, id string, o domain.Order) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `INSERT INTO orders(id,user_id,provider_id,upstream_id,phone_number,country_code,service_code,status,cost,currency,can_get_another_sms,next_poll_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, o.ID, o.UserID, o.ProviderID, o.UpstreamID, o.PhoneNumber, o.CountryCode, o.ServiceCode, o.Status, o.Cost, o.Currency, o.CanGetAnotherSMS, o.NextPollAt, o.ExpiresAt); err != nil {
+	if _, err = tx.Exec(ctx, insertOrderSQL, orderInsertArgs(o)...); err != nil {
 		return err
 	}
 	ct, err := tx.Exec(ctx, `UPDATE purchase_requests SET status='succeeded',order_id=$2,updated_at=now() WHERE id=$1 AND status='provisioning'`, id, o.ID)
@@ -361,11 +546,11 @@ func (s *Postgres) FailPurchase(ctx context.Context, id, status, code string) er
 	return err
 }
 
-const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,o.service_code,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,o.expires_at,o.created_at,o.updated_at`
+const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,o.expires_at,o.created_at,o.updated_at`
 
 func scanOrder(row pgx.Row) (domain.Order, error) {
 	var o domain.Order
-	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.ServiceCode, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.CountryName, &o.ServiceCode, &o.ServiceName, &o.QualityTier, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}

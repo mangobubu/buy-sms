@@ -24,6 +24,7 @@ type memoryRepository struct {
 	captchas  map[string]memoryCaptcha
 	providers map[string]domain.Provider
 	orders    map[string]domain.Order
+	purchases []store.PurchaseRecord
 	messages  []domain.SMSMessage
 	webhooks  map[string]store.WebhookRecord
 	claimed   map[string]bool
@@ -275,6 +276,27 @@ func (r *memoryRepository) ListOrders(_ context.Context, userID string, limit, o
 	return orders, nil
 }
 
+func (r *memoryRepository) ListPurchaseRequests(_ context.Context, userID string, limit int) ([]store.PurchaseRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	records := make([]store.PurchaseRecord, 0, len(r.purchases))
+	for _, record := range r.purchases {
+		if record.UserID == userID {
+			records = append(records, record)
+		}
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].CreatedAt.Equal(records[j].CreatedAt) {
+			return records[i].ID > records[j].ID
+		}
+		return records[i].CreatedAt.After(records[j].CreatedAt)
+	})
+	if limit > 0 && len(records) > limit {
+		records = records[:limit]
+	}
+	return records, nil
+}
+
 func (r *memoryRepository) putProvider(provider domain.Provider) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -285,6 +307,12 @@ func (r *memoryRepository) putOrder(order domain.Order) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.orders[order.ID] = order
+}
+
+func (r *memoryRepository) putPurchase(record store.PurchaseRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.purchases = append(r.purchases, record)
 }
 
 func (r *memoryRepository) putSession(pepper []byte, token string, user domain.User) {

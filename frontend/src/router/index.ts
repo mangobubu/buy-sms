@@ -8,6 +8,12 @@ function adminSlug(to: RouteLocationNormalized): string {
 
 const router = createRouter({
   history: createWebHistory(),
+  scrollBehavior(to) {
+    if (!to.hash) return { top: 0 }
+    return new Promise((resolve) => {
+      window.setTimeout(() => resolve({ el: to.hash, top: 20, behavior: 'smooth' }), 100)
+    })
+  },
   routes: [
     {
       path: '/:adminSlug/login',
@@ -34,13 +40,18 @@ const router = createRouter({
           path: 'buy',
           name: 'buy-number',
           component: () => import('@/views/BuyNumberView.vue'),
-          meta: { title: '购买号码', requiresAuth: true, adminRoute: true },
+          meta: { title: '号码管理', requiresAuth: true, adminRoute: true },
         },
         {
           path: 'orders',
           name: 'orders',
-          component: () => import('@/views/OrdersView.vue'),
-          meta: { title: '号码订单', requiresAuth: true, adminRoute: true },
+          redirect: (to) => ({
+            name: 'buy-number',
+            params: { adminSlug: to.params.adminSlug },
+            query: to.query,
+            hash: to.hash || '#orders',
+          }),
+          meta: { title: '号码管理', requiresAuth: true, adminRoute: true },
         },
         {
           path: 'providers',

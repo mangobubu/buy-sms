@@ -78,7 +78,10 @@ CREATE TABLE IF NOT EXISTS orders (
     upstream_id text NOT NULL,
     phone_number text NOT NULL,
     country_code text NOT NULL,
+    country_name text,
     service_code text NOT NULL,
+    service_name text,
+    quality_tier text NOT NULL DEFAULT '',
     status text NOT NULL CHECK (status IN ('active','completed','canceled','expired')),
     cost numeric(18,6) NOT NULL DEFAULT 0,
     currency text NOT NULL DEFAULT 'USD',
@@ -98,10 +101,76 @@ CREATE TABLE IF NOT EXISTS orders (
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(provider_id, upstream_id)
 );
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS country_name text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_name text;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_inflight boolean NOT NULL DEFAULT false;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_inflight_at timestamptz;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_claim_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'orders_quality_tier_check'
+          AND conrelid = 'orders'::regclass
+    ) THEN
+        ALTER TABLE orders ADD CONSTRAINT orders_quality_tier_check
+            CHECK (quality_tier IN ('','gold','silver','bronze'));
+    END IF;
+END $$;
+UPDATE orders AS o
+SET country_name = CASE
+        WHEN NULLIF(BTRIM(o.country_name), '') IS NULL THEN COALESCE((
+            SELECT pc.name
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'country'
+              AND pc.code = o.country_code
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+            ORDER BY (pc.country = '') DESC, pc.updated_at DESC, pc.name
+            LIMIT 1
+        ), o.country_name)
+        ELSE o.country_name
+    END,
+    service_name = CASE
+        WHEN NULLIF(BTRIM(o.service_name), '') IS NULL THEN COALESCE((
+            SELECT pc.name
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'service'
+              AND pc.code = o.service_code
+              AND pc.country IN (o.country_code, '')
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+            ORDER BY (pc.country = o.country_code) DESC, pc.updated_at DESC, pc.name
+            LIMIT 1
+        ), o.service_name)
+        ELSE o.service_name
+    END
+WHERE (
+        NULLIF(BTRIM(o.country_name), '') IS NULL
+        AND EXISTS (
+            SELECT 1
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'country'
+              AND pc.code = o.country_code
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        )
+    )
+   OR (
+        NULLIF(BTRIM(o.service_name), '') IS NULL
+        AND EXISTS (
+            SELECT 1
+            FROM provider_catalog AS pc
+            WHERE pc.provider_id = o.provider_id
+              AND pc.kind = 'service'
+              AND pc.code = o.service_code
+              AND pc.country IN (o.country_code, '')
+              AND NULLIF(BTRIM(pc.name), '') IS NOT NULL
+        )
+    );
 CREATE INDEX IF NOT EXISTS orders_poll_due ON orders(next_poll_at) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS orders_user_created ON orders(user_id, created_at DESC);
 
@@ -112,6 +181,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     provider_id text NOT NULL REFERENCES providers(id),
     country_code text NOT NULL,
     service_code text NOT NULL,
+    quality_tier text NOT NULL DEFAULT '',
     max_price numeric(18,6) NOT NULL,
     status text NOT NULL CHECK(status IN ('provisioning','succeeded','unknown','failed')),
     order_id uuid REFERENCES orders(id),
@@ -120,6 +190,20 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(user_id,idempotency_key)
 );
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS purchase_requests_user_created ON purchase_requests(user_id, created_at DESC);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'purchase_requests_quality_tier_check'
+          AND conrelid = 'purchase_requests'::regclass
+    ) THEN
+        ALTER TABLE purchase_requests ADD CONSTRAINT purchase_requests_quality_tier_check
+            CHECK (quality_tier IN ('','gold','silver','bronze'));
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS sms_messages (
     id uuid PRIMARY KEY,

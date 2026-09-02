@@ -40,9 +40,11 @@ type Repository interface {
 	GetProvider(context.Context, string) (domain.Provider, error)
 	UpdateProvider(context.Context, domain.Provider) error
 	ReplaceCatalog(context.Context, string, string, []domain.CatalogItem) error
+	UpsertCatalog(context.Context, string, []domain.CatalogItem) error
 	ListCatalog(context.Context, string, string, string) ([]domain.CatalogItem, error)
 	CreateOrder(context.Context, domain.Order) error
 	ReservePurchase(context.Context, PurchaseRecord) (PurchaseRecord, bool, error)
+	ListPurchaseRequests(context.Context, string, int) ([]PurchaseRecord, error)
 	CompletePurchase(context.Context, string, domain.Order) error
 	FailPurchase(context.Context, string, string, string) error
 	GetOrder(context.Context, string, string) (domain.Order, error)
@@ -67,8 +69,9 @@ type Repository interface {
 }
 
 type PurchaseRecord struct {
-	ID, UserID, IdempotencyKey, ProviderID, CountryCode, ServiceCode, Status, OrderID string
-	MaxPrice                                                                          float64
+	ID, UserID, IdempotencyKey, ProviderID, CountryCode, CountryName, ServiceCode, ServiceName, QualityTier, Status, OrderID, ErrorCode string
+	MaxPrice                                                                                                                            float64
+	CreatedAt, UpdatedAt                                                                                                                time.Time
 }
 
 type WebhookRecord struct {

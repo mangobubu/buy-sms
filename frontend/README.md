@@ -49,10 +49,10 @@ npm run build
 | GET | `/dashboard` | 仪表盘汇总 |
 | GET | `/providers` | 供应商配置列表 |
 | PUT | `/providers/:id` | 更新 API 地址、密钥、Webhook 启用状态、供应商启用状态和轮询间隔 |
-| GET | `/catalog/countries?provider=` | 可购买国家 |
-| GET | `/catalog/services?provider=&country=` | 可购买服务 |
-| GET | `/catalog/quote?provider=&country=&service=` | 实时报价 |
-| POST | `/orders` | 购买号码；必须携带 16–128 字符的 `Idempotency-Key` 请求头 |
+| GET | `/catalog/services?provider=` | 可购买服务；兼容可选 `country` 参数 |
+| GET | `/catalog/countries?provider=&service=&tier=` | 按服务查询可购买国家；`tier` 仅用于 SMSBower |
+| GET | `/catalog/quote?provider=&country=&service=&tier=` | 实时报价；`tier` 仅用于 SMSBower |
+| POST | `/orders` | 购买号码；body 可带 SMSBower `tier`，且必须携带 16–128 字符的 `Idempotency-Key` 请求头 |
 | GET | `/orders` | 分页订单列表 |
 | GET | `/orders/:id` | 订单详情 |
 | POST | `/orders/:id/complete` | 完成并结算 |
@@ -62,6 +62,7 @@ npm run build
 | PUT | `/users/:id` | 更新用户 |
 
 供应商规范代码为 `herosms`、`smsbower`、`smspool`。完整 DTO 位于 `src/types/api.ts`。
+购买页统一先选服务再选国家；选择 SMSBower 时还需在国家之前选择 `gold`、`silver` 或 `bronze`，默认 `gold`。
 
 ## 持续收码规则
 

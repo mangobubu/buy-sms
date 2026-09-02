@@ -4,7 +4,7 @@
 
 ## 核心能力
 
-- 聚合三个供应商的国家、服务、价格、库存、下单、取消与结算能力。
+- 聚合三个供应商的服务、国家、价格、库存、下单、取消与结算能力；SMSBower 支持 Gold、Silver、Bronze 号码等级。
 - 供应商支持 Webhook 时优先接收推送，不支持时降级为服务端轮询。
 - 号码在结算或取消前持续接收多条验证码，号码、短信和状态变更都持久化到 PostgreSQL。
 - 登录鉴权与不区分大小写的图形验证码；除登录和验证码签发外，业务接口统一鉴权。
@@ -71,23 +71,32 @@ Windows PowerShell 可使用 `Copy-Item .env.example .env` 创建配置；没有
 首次登录后，请在“供应商配置”页录入 Hero-SMS、SMSBower 与 SMSPool 的 API 地址和密钥。供应商凭证只以加密形式写入 PostgreSQL，不通过浏览器存储或容器环境变量维护；修改 `DATA_ENCRYPTION_KEY` 前必须按应用的数据密钥轮换流程重新加密已有凭证。
 
 购买接口要求 `Idempotency-Key` 请求头。管理端会为一次购买尝试生成并复用该键；当上游响应超时、结果未知时，同键重试不会再次购买，避免重复扣费。
+SMSBower 的 `tier` 可取 `gold`、`silver`、`bronze`；报价与购买使用同一等级，等级也是幂等请求身份的一部分。
 
 ## Docker 部署
 
 Compose 不会把 PostgreSQL 端口映射到宿主机，数据库只存在于项目内部网络。应用默认只绑定宿主机 `127.0.0.1:18080`，可通过 `APP_BIND_ADDR` 和 `APP_PORT` 修改；公网部署建议保持本机绑定并由 Nginx、Caddy 或负载均衡器终止 TLS。
 
+PostgreSQL 数据使用固定的外部卷。生产 `.env` 必须用不加引号、不带行尾注释的单行 `POSTGRES_VOLUME_NAME` 指定卷名，默认示例为 `buy-sms_postgres-data`。仅在确认是首次部署时显式创建：
+
+```bash
+make docker-volume-create
+```
+
+`make docker-up` 与 `make docker-up-cn` 会先只读检查该卷；卷缺失时部署会中止，已上线环境应恢复原卷而不是新建空卷。由于该卷声明为 external，`docker compose down -v` 也不会删除它。
+
 国际网络环境：
 
 ```bash
-docker compose --env-file .env config --quiet
-docker compose up -d --build
+make docker-config
+make docker-up
 ```
 
 中国大陆网络环境（叠加镜像与依赖源配置）：
 
 ```bash
-docker compose --env-file .env -f docker-compose.yml -f docker-compose.cn.yml config --quiet
-docker compose -f docker-compose.yml -f docker-compose.cn.yml up -d --build
+make docker-config-cn
+make docker-up-cn
 ```
 
 仅检查仓库内示例配置的结构时，可执行 `docker compose --env-file .env.example config --quiet`；该命令只解析配置、不启动服务，示例密钥不得用于实际部署。

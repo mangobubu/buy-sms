@@ -62,6 +62,7 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.GET("/catalog/services", h.services)
 	authed.GET("/catalog/quote", h.quote)
 	authed.POST("/orders", h.createOrder)
+	authed.GET("/purchase-attempts", h.purchaseAttempts)
 	authed.GET("/orders", h.orders)
 	authed.GET("/orders/:id", h.order)
 	authed.POST("/orders/:id/complete", h.completeOrder)
@@ -258,7 +259,7 @@ func (h *Handler) updateProvider(c *gin.Context) {
 	c.JSON(http.StatusOK, value)
 }
 func (h *Handler) countries(c *gin.Context) {
-	value, err := h.app.Countries(c.Request.Context(), c.Query("provider"))
+	value, err := h.app.Countries(c.Request.Context(), c.Query("provider"), c.Query("service"), c.Query("tier"))
 	if err != nil {
 		respondError(c, err)
 		return
@@ -266,7 +267,7 @@ func (h *Handler) countries(c *gin.Context) {
 	c.JSON(http.StatusOK, value)
 }
 func (h *Handler) services(c *gin.Context) {
-	value, err := h.app.Services(c.Request.Context(), c.Query("provider"), c.Query("country"))
+	value, err := h.app.Services(c.Request.Context(), c.Query("provider"), c.Query("country"), c.Query("tier"))
 	if err != nil {
 		respondError(c, err)
 		return
@@ -274,7 +275,7 @@ func (h *Handler) services(c *gin.Context) {
 	c.JSON(http.StatusOK, value)
 }
 func (h *Handler) quote(c *gin.Context) {
-	value, err := h.app.Quote(c.Request.Context(), c.Query("provider"), c.Query("country"), c.Query("service"))
+	value, err := h.app.Quote(c.Request.Context(), c.Query("provider"), c.Query("country"), c.Query("service"), c.Query("tier"))
 	if err != nil {
 		respondError(c, err)
 		return
@@ -293,6 +294,14 @@ func (h *Handler) createOrder(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, value)
+}
+func (h *Handler) purchaseAttempts(c *gin.Context) {
+	value, err := h.app.PurchaseAttempts(c.Request.Context(), currentUser(c))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
 }
 func (h *Handler) orders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -409,6 +418,25 @@ func currentUser(c *gin.Context) domain.User {
 	return u
 }
 func respondError(c *gin.Context, err error) {
+	var purchaseErr *application.PurchaseError
+	if errors.As(err, &purchaseErr) {
+		status := http.StatusInternalServerError
+		switch purchaseErr.Code {
+		case "idempotency_mismatch", "purchase_in_progress", "purchase_result_unknown", "price_exceeded", "no_numbers", "provider_disabled", "purchase_failed":
+			status = http.StatusConflict
+		case "invalid_selection":
+			status = http.StatusBadRequest
+		case "provider_rate_limited":
+			status = http.StatusTooManyRequests
+		case "provider_error", "configuration", "insufficient_balance":
+			status = http.StatusBadGateway
+		}
+		if status == http.StatusInternalServerError {
+			slog.Error("购买请求处理失败", "error", err, "code", purchaseErr.Code, "path", c.Request.URL.Path)
+		}
+		failWithCode(c, status, purchaseErr.Code, purchaseErr.Message)
+		return
+	}
 	switch {
 	case errors.Is(err, application.ErrBadRequest):
 		bad(c, err.Error())
@@ -424,8 +452,35 @@ func respondError(c *gin.Context, err error) {
 		serverError(c, err)
 	}
 }
-func bad(c *gin.Context, message string)              { fail(c, http.StatusBadRequest, message) }
-func fail(c *gin.Context, status int, message string) { c.JSON(status, gin.H{"message": message}) }
+func bad(c *gin.Context, message string) { fail(c, http.StatusBadRequest, message) }
+func fail(c *gin.Context, status int, message string) {
+	failWithCode(c, status, defaultErrorCode(status), message)
+}
+func failWithCode(c *gin.Context, status int, code, message string) {
+	c.JSON(status, gin.H{"code": code, "message": message})
+}
+func defaultErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	case http.StatusBadGateway:
+		return "provider_error"
+	default:
+		return "internal_error"
+	}
+}
 func serverError(c *gin.Context, err error) {
 	requestPath := c.Request.URL.Path
 	if strings.HasPrefix(requestPath, "/api/webhooks/") {

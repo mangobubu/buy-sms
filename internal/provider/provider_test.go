@@ -109,7 +109,18 @@ func TestHeroSMSNativeLifecycleAndFullOTPHistory(t *testing.T) {
 func TestSMSBowerCompatibilityLifecycle(t *testing.T) {
 	var numberV2Calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet || request.URL.Query().Get("api_key") != testAPIKey {
+		if request.Method != http.MethodGet {
+			http.Error(writer, "BAD_METHOD", http.StatusMethodNotAllowed)
+			return
+		}
+		if request.URL.Path == "/services/getList" {
+			if request.URL.Query().Get("api_key") != "" {
+				t.Errorf("公开服务目录不应携带 api_key: %s", request.URL.RawQuery)
+			}
+			_, _ = writer.Write([]byte(`[{"id":1,"title":"KakaoTalk","activate_org_code":"kt"}]`))
+			return
+		}
+		if request.URL.Query().Get("api_key") != testAPIKey {
 			http.Error(writer, "BAD_KEY", http.StatusBadRequest)
 			return
 		}
@@ -164,6 +175,10 @@ func TestSMSBowerCompatibilityLifecycle(t *testing.T) {
 	if err != nil || len(services) != 1 || services[0].Code != "kt" || services[0].Name != "KakaoTalk" {
 		t.Fatalf("SMSBower 服务目录错误: %#v, %v", services, err)
 	}
+	tierServices, err := client.Catalog(context.Background(), testAPIKey, CatalogRequest{Kind: CatalogService, QualityTier: "gold"})
+	if err != nil || len(tierServices) != 1 || tierServices[0].Code != "kt" {
+		t.Fatalf("SMSBower 合法等级不应改变服务目录: %#v, %v", tierServices, err)
+	}
 	prices, err := client.Catalog(context.Background(), testAPIKey, CatalogRequest{Kind: CatalogPrice, Country: "2", Service: "kt"})
 	if err != nil || len(prices) != 1 || prices[0].Price == nil || *prices[0].Price != 0.12 || prices[0].Stock == nil || *prices[0].Stock != 10 {
 		t.Fatalf("SMSBower 价格目录错误: %#v, %v", prices, err)
@@ -192,6 +207,115 @@ func TestSMSBowerCompatibilityLifecycle(t *testing.T) {
 	}
 	if err := client.Cancel(context.Background(), testAPIKey, "44"); err != nil {
 		t.Fatalf("SMSBower 取消失败: %v", err)
+	}
+}
+
+func TestSMSBowerQualityTiersFilterCatalogAndPurchaseProviders(t *testing.T) {
+	var vitrineCalls atomic.Int32
+	var numberV2Calls, numberCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/services/getList":
+			vitrineCalls.Add(1)
+			_, _ = writer.Write([]byte(`[{"id":12,"title":"KakaoTalk","activate_org_code":"kt"}]`))
+		case "/activations/getPricesByService":
+			vitrineCalls.Add(1)
+			if request.URL.Query().Get("api_key") != "" {
+				t.Errorf("公开等级报价不应携带 api_key: %s", request.URL.RawQuery)
+			}
+			if request.URL.Query().Get("serviceId") != "12" {
+				t.Errorf("等级报价 serviceId=%q", request.URL.Query().Get("serviceId"))
+			}
+			rank := request.URL.Query().Get("rank")
+			providerID := map[string]string{"1": "101", "2": "201", "3": "301"}[rank]
+			if providerID == "" {
+				t.Errorf("等级报价 rank=%q", rank)
+				http.Error(writer, `{"error":"bad rank"}`, http.StatusBadRequest)
+				return
+			}
+			_, _ = fmt.Fprintf(writer, `{"services":{"12":{"countries":{"7":{"title":"Vietnam","activate_org_code":"10","positions":{"%s|0.12":{"price":0.12,"count":4,"rank":{"id":%s},"agent_ids":[%s,"%s3","bad"],"agent_prices":{"%s":0.12,"%s3":0.99}},"%s|0.30":{"price":0.30,"count":2,"rank":{"id":%s},"agent_ids":[%s9],"agent_prices":{"2019":0.01}},"%s|0.05-empty":{"price":0.05,"count":0,"rank":{"id":%s},"agent_ids":[%s7]},"%s|0.01-negative":{"price":0.01,"count":-3,"rank":{"id":%s},"agent_ids":[%s8]}}}}}}}`, rank, rank, providerID, providerID, providerID, providerID, rank, rank, providerID, rank, rank, providerID, rank, rank, providerID)
+		case "/stubs/handler_api.php":
+			query := request.URL.Query()
+			if query.Get("api_key") != testAPIKey {
+				t.Errorf("等级购买公共参数错误: %s", request.URL.RawQuery)
+			}
+			if query.Get("rank") != "" {
+				t.Errorf("等级购买不应直接传 rank: %s", request.URL.RawQuery)
+			}
+			if query.Get("minPrice") != query.Get("maxPrice") {
+				t.Errorf("Silver 精确价位参数不一致: minPrice=%q maxPrice=%q", query.Get("minPrice"), query.Get("maxPrice"))
+			}
+			expectedProviderIDs := map[string]string{"0.12": "201,2013", "0.3": "2019"}[query.Get("minPrice")]
+			if expectedProviderIDs == "" || query.Get("providerIds") != expectedProviderIDs {
+				t.Errorf("Silver 价位 %q 的来源=%q，期望=%q", query.Get("minPrice"), query.Get("providerIds"), expectedProviderIDs)
+			}
+			switch query.Get("action") {
+			case "getNumberV2":
+				numberV2Calls.Add(1)
+				_, _ = writer.Write([]byte("BAD_ACTION"))
+			case "getNumber":
+				numberCalls.Add(1)
+				_, _ = writer.Write([]byte("ACCESS_NUMBER:tier-44:84990001122"))
+			default:
+				t.Errorf("等级购买 action 错误: %s", request.URL.RawQuery)
+				_, _ = writer.Write([]byte("BAD_ACTION"))
+			}
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	client := NewSMSBower(server.URL + "/stubs/handler_api.php")
+	for _, testCase := range []struct {
+		tier string
+		rank string
+	}{
+		{tier: "gold", rank: "1"},
+		{tier: "silver", rank: "2"},
+		{tier: "bronze", rank: "3"},
+	} {
+		t.Run(testCase.tier, func(t *testing.T) {
+			before := vitrineCalls.Load()
+			items, err := client.Catalog(context.Background(), testAPIKey, CatalogRequest{
+				Kind: CatalogCountry, Service: "kt", QualityTier: testCase.tier,
+			})
+			if err != nil || len(items) != 1 || items[0].Code != "10" || items[0].Name != "Vietnam" || items[0].Price == nil || *items[0].Price != 0.12 || items[0].Stock == nil || *items[0].Stock != 4 {
+				t.Fatalf("%s 等级国家解析错误: items=%#v err=%v", testCase.tier, items, err)
+			}
+			if calls := vitrineCalls.Load() - before; calls < 1 || calls > 2 {
+				t.Fatalf("%s 等级报价调用次数=%d", testCase.tier, calls)
+			}
+		})
+	}
+
+	quotes, err := client.Catalog(context.Background(), testAPIKey, CatalogRequest{
+		Kind: CatalogPrice, Country: "10", Service: "kt", QualityTier: "silver",
+	})
+	if err != nil || len(quotes) != 1 || quotes[0].Code != "kt" || quotes[0].Country != "10" ||
+		quotes[0].Price == nil || *quotes[0].Price != 0.12 || quotes[0].Stock == nil || *quotes[0].Stock != 4 ||
+		len(quotes[0].PriceOptions) != 2 || quotes[0].PriceOptions[0].Price != 0.12 || quotes[0].PriceOptions[0].Available != 4 ||
+		quotes[0].PriceOptions[1].Price != 0.30 || quotes[0].PriceOptions[1].Available != 2 {
+		t.Fatalf("Silver 等级报价解析错误: items=%#v err=%v", quotes, err)
+	}
+
+	for index, selectedPrice := range []float64{0.12, 0.30} {
+		result, purchaseErr := client.Purchase(context.Background(), testAPIKey, PurchaseRequest{
+			Country: "10", Service: "kt", QualityTier: "silver", MaxPrice: &selectedPrice,
+		})
+		wantCalls := int32(index + 1)
+		if purchaseErr != nil || result.UpstreamID != "tier-44" || result.PhoneNumber != "84990001122" || result.Cost != selectedPrice || numberV2Calls.Load() != wantCalls || numberCalls.Load() != wantCalls {
+			t.Fatalf("Silver 价位 %.2f 购买降级错误: result=%#v v2=%d fallback=%d err=%v", selectedPrice, result, numberV2Calls.Load(), numberCalls.Load(), purchaseErr)
+		}
+	}
+
+	before := vitrineCalls.Load()
+	if _, err = client.Catalog(context.Background(), testAPIKey, CatalogRequest{Kind: CatalogCountry, Service: "kt", QualityTier: "platinum"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("非法等级错误=%v，期望 ErrInvalidRequest", err)
+	}
+	if vitrineCalls.Load() != before {
+		t.Fatal("非法等级不应调用 SMSBower 档位接口")
 	}
 }
 
@@ -408,6 +532,17 @@ func TestProviderFactoryAndValidation(t *testing.T) {
 	}
 	if _, err := client.Purchase(context.Background(), "", PurchaseRequest{Country: "1", Service: "2"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("空密钥错误=%v", err)
+	}
+	for name, other := range map[string]Client{
+		"HeroSMS": NewHeroSMS("http://example.invalid/api/v1"),
+		"SMSPool": NewSMSPool("http://example.invalid"),
+	} {
+		if _, err := other.Catalog(context.Background(), testAPIKey, CatalogRequest{Kind: CatalogService, QualityTier: "gold"}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s 目录接受了 SMSBower 等级: %v", name, err)
+		}
+		if _, err := other.Purchase(context.Background(), testAPIKey, PurchaseRequest{Country: "1", Service: "tg", QualityTier: "gold"}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s 购买接受了 SMSBower 等级: %v", name, err)
+		}
 	}
 }
 

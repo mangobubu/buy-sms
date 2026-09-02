@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -34,6 +35,64 @@ var (
 	ErrForbidden  = errors.New("权限不足")
 	ErrProvider   = errors.New("供应商暂时不可用")
 )
+
+// PurchaseError 是购买接口的稳定错误契约。Kind 保留对通用错误的
+// errors.Is 兼容，Code 则供 HTTP 客户端作稳定判断。
+type PurchaseError struct {
+	Code    string
+	Message string
+	Kind    error
+	Cause   error
+}
+
+func (e *PurchaseError) Error() string { return e.Message }
+
+func (e *PurchaseError) Unwrap() []error {
+	errs := make([]error, 0, 2)
+	if e.Kind != nil {
+		errs = append(errs, e.Kind)
+	}
+	if e.Cause != nil && !errors.Is(e.Cause, e.Kind) {
+		errs = append(errs, e.Cause)
+	}
+	return errs
+}
+
+func purchaseError(code string, cause error) *PurchaseError {
+	err := &PurchaseError{Code: code, Cause: cause}
+	switch code {
+	case "idempotency_mismatch":
+		err.Message, err.Kind = "该购买编号已用于其他条件，页面将生成新的购买请求", ErrConflict
+	case "purchase_in_progress":
+		err.Message, err.Kind = "购买请求正在处理中，可在“最近购买尝试”中查看状态", ErrConflict
+	case "purchase_result_unknown":
+		err.Message, err.Kind = "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买", ErrConflict
+	case "price_exceeded":
+		err.Message, err.Kind = "供应商实际价格超过所选价格，购买已取消", ErrConflict
+	case "no_numbers":
+		err.Message, err.Kind = "所选条件当前暂无可用号码，请稍后重试或调整条件", ErrConflict
+	case "insufficient_balance":
+		err.Message, err.Kind = "供应商账户余额不足，请联系管理员充值", ErrProvider
+	case "invalid_selection":
+		err.Message, err.Kind = "供应商不支持所选国家或服务，请重新选择", ErrBadRequest
+	case "provider_rate_limited":
+		err.Message, err.Kind = "供应商请求过于频繁，请稍后重试", ErrProvider
+	case "provider_disabled":
+		err.Message, err.Kind = "所选供应商已停用，请选择其他供应商", ErrConflict
+	case "provider_error":
+		err.Message, err.Kind = "供应商响应异常，请在“最近购买尝试”中查看状态，请勿重复购买", ErrProvider
+	case "configuration":
+		err.Message, err.Kind = "供应商配置不完整，请联系管理员", ErrProvider
+	case "purchase_setup_failed":
+		err.Message = "购买准备失败，请稍后重试"
+	case "database_error":
+		err.Message = "购买结果保存异常，请在“最近购买尝试”中查看状态，请勿重复购买"
+	default:
+		err.Code = "purchase_failed"
+		err.Message, err.Kind = "购买请求已失败，请刷新页面后重试", ErrConflict
+	}
+	return err
+}
 
 type Service struct {
 	repo                    store.Repository
@@ -185,8 +244,14 @@ func (s *Service) providerView(p domain.Provider) (ProviderDTO, error) {
 	return ProviderDTO{ID: p.ID, Code: p.ID, Name: p.Name, APIBaseURL: p.BaseURL, Enabled: p.Enabled, PollingIntervalSeconds: settings.PollingIntervalSeconds, WebhookSupported: true, WebhookEnabled: settings.WebhookEnabled, HasAPIKey: p.APIKeyConfigured, HasWebhookToken: p.WebhookConfigured, WebhookURL: s.config.PublicBaseURL + "/api/webhooks/" + p.ID + "/" + url.PathEscape(token), UpdatedAt: p.UpdatedAt}, nil
 }
 
-func (s *Service) Countries(ctx context.Context, pid string) ([]CountryDTO, error) {
-	items, err := s.catalog(ctx, pid, provider.CatalogRequest{Kind: provider.CatalogCountry})
+func (s *Service) Countries(ctx context.Context, pid, service, tier string) ([]CountryDTO, error) {
+	service = strings.TrimSpace(service)
+	tier, err := normalizeQualityTier(pid, tier)
+	if err != nil || (tier != "" && service == "") {
+		return nil, ErrBadRequest
+	}
+	request := provider.CatalogRequest{Kind: provider.CatalogCountry, Service: service, QualityTier: tier}
+	items, err := s.catalog(ctx, pid, request)
 	if err != nil {
 		return nil, err
 	}
@@ -196,11 +261,13 @@ func (s *Service) Countries(ctx context.Context, pid string) ([]CountryDTO, erro
 	}
 	return out, nil
 }
-func (s *Service) Services(ctx context.Context, pid, country string) ([]ServiceDTO, error) {
-	if strings.TrimSpace(country) == "" {
-		return nil, ErrBadRequest
+func (s *Service) Services(ctx context.Context, pid, country, tier string) ([]ServiceDTO, error) {
+	country = strings.TrimSpace(country)
+	tier, err := normalizeQualityTier(pid, tier)
+	if err != nil {
+		return nil, err
 	}
-	items, err := s.catalog(ctx, pid, provider.CatalogRequest{Kind: provider.CatalogService, Country: country})
+	items, err := s.catalog(ctx, pid, provider.CatalogRequest{Kind: provider.CatalogService, Country: country, QualityTier: tier})
 	if err != nil {
 		return nil, err
 	}
@@ -210,11 +277,17 @@ func (s *Service) Services(ctx context.Context, pid, country string) ([]ServiceD
 	}
 	return out, nil
 }
-func (s *Service) Quote(ctx context.Context, pid, country, service string) (QuoteDTO, error) {
+func (s *Service) Quote(ctx context.Context, pid, country, service, tier string) (QuoteDTO, error) {
+	country = strings.TrimSpace(country)
+	service = strings.TrimSpace(service)
 	if country == "" || service == "" {
 		return QuoteDTO{}, ErrBadRequest
 	}
-	items, err := s.catalog(ctx, pid, provider.CatalogRequest{Kind: provider.CatalogPrice, Country: country, Service: service})
+	tier, err := normalizeQualityTier(pid, tier)
+	if err != nil {
+		return QuoteDTO{}, err
+	}
+	items, err := s.catalog(ctx, pid, provider.CatalogRequest{Kind: provider.CatalogPrice, Country: country, Service: service, QualityTier: tier})
 	if err != nil {
 		return QuoteDTO{}, err
 	}
@@ -228,10 +301,25 @@ func (s *Service) Quote(ctx context.Context, pid, country, service string) (Quot
 			if x.Stock != nil {
 				stock = *x.Stock
 			}
-			return QuoteDTO{Provider: domain.NormalizeProvider(pid), ProviderName: providerName(domain.NormalizeProvider(pid)), CountryCode: country, ServiceCode: service, Price: price, Currency: "USD", Available: stock}, nil
+			priceOptions := quotePriceOptions(x, price, stock)
+			return QuoteDTO{Provider: domain.NormalizeProvider(pid), ProviderName: providerName(domain.NormalizeProvider(pid)), CountryCode: country, ServiceCode: service, QualityTier: tier, Price: price, Currency: "USD", Available: stock, PriceOptions: priceOptions}, nil
 		}
 	}
 	return QuoteDTO{}, ErrNotFound
+}
+
+func quotePriceOptions(item domain.CatalogItem, fallbackPrice string, fallbackStock int) []QuotePriceOptionDTO {
+	options := make([]QuotePriceOptionDTO, 0, len(item.PriceOptions))
+	for _, option := range item.PriceOptions {
+		options = append(options, QuotePriceOptionDTO{
+			Price:     strconv.FormatFloat(option.Price, 'f', -1, 64),
+			Available: option.Available,
+		})
+	}
+	if len(options) == 0 {
+		options = append(options, QuotePriceOptionDTO{Price: fallbackPrice, Available: fallbackStock})
+	}
+	return options
 }
 
 func (s *Service) catalog(ctx context.Context, pid string, req provider.CatalogRequest) ([]domain.CatalogItem, error) {
@@ -244,25 +332,91 @@ func (s *Service) catalog(ctx context.Context, pid string, req provider.CatalogR
 		return nil, ErrConflict
 	}
 	items, callErr := client.Catalog(ctx, key, req)
-	if callErr == nil && len(items) > 0 {
-		for i := range items {
-			items[i].ProviderID = pid
-			items[i].Kind = req.Kind
-			if items[i].Country == "" && req.Kind != provider.CatalogCountry {
-				items[i].Country = req.Country
+	if callErr == nil {
+		if len(items) > 0 {
+			for i := range items {
+				items[i].ProviderID = pid
+				items[i].Kind = req.Kind
+				if items[i].Country == "" && req.Kind != provider.CatalogCountry {
+					items[i].Country = req.Country
+				}
+				items[i].UpdatedAt = s.now()
 			}
-			items[i].UpdatedAt = s.now()
+			switch catalogPersistence(req) {
+			case catalogReplace:
+				if err = s.repo.ReplaceCatalog(ctx, pid, req.Kind, items); err != nil {
+					return nil, err
+				}
+			case catalogUpsert:
+				if err = s.repo.UpsertCatalog(ctx, pid, catalogItemsForPersistence(req, items)); err != nil {
+					return nil, err
+				}
+			}
+			return items, nil
 		}
-		if err = s.repo.ReplaceCatalog(ctx, pid, req.Kind, items); err != nil {
-			return nil, err
+		if req.Service != "" || req.QualityTier != "" {
+			return []domain.CatalogItem{}, nil
 		}
-		return items, nil
 	}
-	cached, cacheErr := s.repo.ListCatalog(ctx, pid, req.Kind, req.Country)
-	if cacheErr == nil && len(cached) > 0 {
-		return cached, nil
+	if req.QualityTier == "" && (req.Kind != provider.CatalogPrice || req.Service == "") {
+		cached, cacheErr := s.repo.ListCatalog(ctx, pid, req.Kind, req.Country)
+		if cacheErr == nil && len(cached) > 0 {
+			return cached, nil
+		}
 	}
 	return nil, ErrProvider
+}
+
+type catalogPersistenceMode uint8
+
+const (
+	catalogSkip catalogPersistenceMode = iota
+	catalogReplace
+	catalogUpsert
+)
+
+func catalogPersistence(req provider.CatalogRequest) catalogPersistenceMode {
+	if req.Kind == provider.CatalogPrice {
+		if req.Country != "" || req.Service != "" || req.QualityTier != "" {
+			return catalogSkip
+		}
+		return catalogReplace
+	}
+	if req.Service != "" || req.QualityTier != "" {
+		return catalogUpsert
+	}
+	return catalogReplace
+}
+
+func catalogItemsForPersistence(req provider.CatalogRequest, items []domain.CatalogItem) []domain.CatalogItem {
+	if req.QualityTier == "" {
+		return items
+	}
+	// provider_catalog 没有 tier 维度。等级国家/服务目录仅保存可读名称，
+	// 不能让某档位的价格或库存覆盖通用目录。
+	cached := append([]domain.CatalogItem(nil), items...)
+	for i := range cached {
+		cached[i].Price = nil
+		cached[i].Stock = nil
+		cached[i].Raw = json.RawMessage(`{}`)
+	}
+	return cached
+}
+
+func normalizeQualityTier(providerID, tier string) (string, error) {
+	tier = strings.ToLower(strings.TrimSpace(tier))
+	if tier == "" {
+		return "", nil
+	}
+	if domain.NormalizeProvider(providerID) != domain.ProviderSMSBower {
+		return "", ErrBadRequest
+	}
+	switch tier {
+	case "gold", "silver", "bronze":
+		return tier, nil
+	default:
+		return "", ErrBadRequest
+	}
 }
 
 func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.User, ip string) (OrderDTO, error) {
@@ -270,47 +424,67 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if pid == "" || in.CountryCode == "" || in.ServiceCode == "" {
 		return OrderDTO{}, ErrBadRequest
 	}
+	tier, err := normalizeQualityTier(pid, in.QualityTier)
+	if err != nil {
+		return OrderDTO{}, err
+	}
+	in.QualityTier = tier
 	max, err := strconv.ParseFloat(in.MaxPrice, 64)
 	if err != nil || max <= 0 || max > 1_000_000 || math.IsNaN(max) || math.IsInf(max, 0) || len(in.IdempotencyKey) < 16 || len(in.IdempotencyKey) > 128 {
 		return OrderDTO{}, ErrBadRequest
 	}
-	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, MaxPrice: max})
+	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, MaxPrice: max})
 	if err != nil {
 		return OrderDTO{}, err
 	}
 	if !created {
-		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || math.Abs(record.MaxPrice-max) > .000001 {
-			return OrderDTO{}, ErrConflict
+		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || math.Abs(record.MaxPrice-max) > .000001 {
+			return OrderDTO{}, purchaseError("idempotency_mismatch", nil)
 		}
 		if record.Status == "succeeded" && record.OrderID != "" {
 			return s.Order(ctx, record.OrderID, user)
 		}
-		return OrderDTO{}, ErrConflict
+		switch record.Status {
+		case "provisioning":
+			return OrderDTO{}, purchaseError("purchase_in_progress", nil)
+		case "unknown":
+			return OrderDTO{}, purchaseError("purchase_result_unknown", nil)
+		case "failed":
+			return OrderDTO{}, purchaseError(record.ErrorCode, nil)
+		default:
+			return OrderDTO{}, purchaseError("purchase_result_unknown", nil)
+		}
 	}
 	p, key, client, err := s.providerClient(ctx, pid)
 	if err != nil {
-		s.failPurchase(record.ID, "failed", "configuration")
-		return OrderDTO{}, err
+		code := "purchase_setup_failed"
+		if errors.Is(err, ErrBadRequest) || errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			code = "configuration"
+		}
+		s.failPurchase(record.ID, "failed", code)
+		return OrderDTO{}, purchaseError(code, err)
 	}
 	if !p.Enabled {
 		s.failPurchase(record.ID, "failed", "provider_disabled")
-		return OrderDTO{}, ErrConflict
+		return OrderDTO{}, purchaseError("provider_disabled", nil)
 	}
-	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, MaxPrice: &max})
+	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, MaxPrice: &max})
 	if err != nil {
-		// 上游可能已经完成购买后才发生超时或断线。此时原请求上下文通常
-		// 已取消，必须用独立短时上下文持久化 unknown，阻止同一幂等键重购。
-		s.failPurchase(record.ID, "unknown", "provider_error")
-		return OrderDTO{}, ErrProvider
+		status, code := classifyProviderPurchaseError(err)
+		s.failPurchase(record.ID, status, code)
+		return OrderDTO{}, purchaseError(code, err)
 	}
 	if result.Cost > max+0.000001 {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		_ = client.Cancel(cancelCtx, key, result.UpstreamID)
+		if cancelErr := client.Cancel(cancelCtx, key, result.UpstreamID); cancelErr != nil {
+			s.failPurchase(record.ID, "unknown", "price_cancel_unknown")
+			return OrderDTO{}, purchaseError("purchase_result_unknown", cancelErr)
+		}
 		s.failPurchase(record.ID, "failed", "price_exceeded")
-		return OrderDTO{}, ErrConflict
+		return OrderDTO{}, purchaseError("price_exceeded", nil)
 	}
-	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt}
+	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt}
 	if o.Currency == "" {
 		o.Currency = "USD"
 	}
@@ -319,7 +493,7 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		defer cancel()
 		_ = client.Cancel(cancelCtx, key, result.UpstreamID)
 		s.failPurchase(record.ID, "unknown", "database_error")
-		return OrderDTO{}, mapStore(err)
+		return OrderDTO{}, purchaseError("database_error", mapStore(err))
 	}
 	_ = s.repo.Audit(ctx, &user.ID, "order.create", "order", o.ID, ip, nil)
 	fresh, err := s.repo.GetOrder(ctx, o.ID, "")
@@ -329,11 +503,87 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	return OrderView(fresh, readSettings(p.Config).WebhookEnabled), nil
 }
 
+func classifyProviderPurchaseError(err error) (status, code string) {
+	// 参数在调用供应商前即被拒绝，没有产生上游订单。
+	if errors.Is(err, provider.ErrInvalidRequest) {
+		return "failed", "invalid_selection"
+	}
+	var upstream *provider.ProviderError
+	if !errors.As(err, &upstream) {
+		return "unknown", "provider_error"
+	}
+	// HTTP 5xx 和 429 可能发生在上游已创建号码之后。
+	// 即使响应正文包含看似确定的业务码，也不能据此允许新幂等键重购。
+	if upstream.HTTPStatus >= http.StatusInternalServerError || upstream.HTTPStatus == http.StatusTooManyRequests {
+		return "unknown", "provider_error"
+	}
+	switch strings.ToUpper(strings.TrimSpace(upstream.Code)) {
+	case "MAX_PRICE_EXCEEDED", "WRONG_MAX_PRICE":
+		return "failed", "price_exceeded"
+	case "NO_NUMBERS", "OUT_OF_STOCK":
+		return "failed", "no_numbers"
+	case "NO_BALANCE", "INSUFFICIENT_BALANCE", "INSUFFICIENTBALANCE", "INSUFFICIENT_FUNDS", "INSUFFICIENTFUNDS", "NOT_ENOUGH_BALANCE", "NOTENOUGHBALANCE", "LOW_BALANCE", "LOWBALANCE":
+		return "failed", "insufficient_balance"
+	case "BAD_SERVICE", "BAD_COUNTRY":
+		return "failed", "invalid_selection"
+	case "BAD_KEY", "BAD_ACTION", "BAD_STATUS", "NO_ACTIVATION", "EARLY_CANCEL_DENIED", "ACCOUNT_INACTIVE", "BANNED", "INVALID_BASE_URL", "INVALID_REQUEST":
+		return "failed", "configuration"
+	case "RATE_LIMIT":
+		return "failed", "provider_rate_limited"
+	case "TIMEOUT", "TRANSPORT_ERROR", "READ_ERROR", "NO_CONNECTION", "CANCELED", "RESPONSE_TOO_LARGE", "INVALID_RESPONSE":
+		return "unknown", "provider_error"
+	default:
+		// 超时、断线、读取失败、5xx 和无法解析的成功响应，都可能发生在
+		// 上游已经创建号码之后，必须保留原幂等键阻止重复扣费。
+		return "unknown", "provider_error"
+	}
+}
+
 func (s *Service) failPurchase(id, status, code string) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.repo.FailPurchase(cleanupCtx, id, status, code); err != nil {
 		slog.Error("更新购买意图失败", "purchase_id", id, "status", status, "error", err)
+	}
+}
+
+func (s *Service) PurchaseAttempts(ctx context.Context, user domain.User) ([]PurchaseAttemptDTO, error) {
+	records, err := s.repo.ListPurchaseRequests(ctx, user.ID, 20)
+	if err != nil {
+		return nil, mapStore(err)
+	}
+	attempts := make([]PurchaseAttemptDTO, 0, len(records))
+	for _, record := range records {
+		attempts = append(attempts, PurchaseAttemptDTO{
+			Provider:    record.ProviderID,
+			CountryCode: record.CountryCode,
+			CountryName: record.CountryName,
+			ServiceCode: record.ServiceCode,
+			ServiceName: record.ServiceName,
+			QualityTier: record.QualityTier,
+			MaxPrice:    strconv.FormatFloat(record.MaxPrice, 'f', -1, 64),
+			Status:      record.Status,
+			ErrorCode:   record.ErrorCode,
+			Message:     purchaseAttemptMessage(record.Status, record.ErrorCode),
+			CreatedAt:   record.CreatedAt,
+			UpdatedAt:   record.UpdatedAt,
+		})
+	}
+	return attempts, nil
+}
+
+func purchaseAttemptMessage(status, errorCode string) string {
+	switch status {
+	case "succeeded":
+		return "购买成功"
+	case "provisioning":
+		return purchaseError("purchase_in_progress", nil).Message
+	case "unknown":
+		return purchaseError("purchase_result_unknown", nil).Message
+	case "failed":
+		return purchaseError(errorCode, nil).Message
+	default:
+		return purchaseError("purchase_result_unknown", nil).Message
 	}
 }
 

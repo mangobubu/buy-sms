@@ -52,15 +52,21 @@ type Provider struct {
 }
 
 type CatalogItem struct {
-	ProviderID string          `json:"providerId"`
-	Kind       string          `json:"kind"`
-	Code       string          `json:"code"`
-	Country    string          `json:"country,omitempty"`
-	Name       string          `json:"name"`
-	Price      *float64        `json:"price,omitempty"`
-	Stock      *int            `json:"stock,omitempty"`
-	Raw        json.RawMessage `json:"-"`
-	UpdatedAt  time.Time       `json:"updatedAt"`
+	ProviderID   string               `json:"providerId"`
+	Kind         string               `json:"kind"`
+	Code         string               `json:"code"`
+	Country      string               `json:"country,omitempty"`
+	Name         string               `json:"name"`
+	Price        *float64             `json:"price,omitempty"`
+	Stock        *int                 `json:"stock,omitempty"`
+	PriceOptions []CatalogPriceOption `json:"priceOptions,omitempty"`
+	Raw          json.RawMessage      `json:"-"`
+	UpdatedAt    time.Time            `json:"updatedAt"`
+}
+
+type CatalogPriceOption struct {
+	Price     float64 `json:"price"`
+	Available int     `json:"available"`
 }
 
 type Order struct {
@@ -70,7 +76,10 @@ type Order struct {
 	UpstreamID                 string       `json:"upstreamId"`
 	PhoneNumber                string       `json:"phoneNumber"`
 	CountryCode                string       `json:"countryCode"`
+	CountryName                string       `json:"countryName,omitempty"`
 	ServiceCode                string       `json:"serviceCode"`
+	ServiceName                string       `json:"serviceName,omitempty"`
+	QualityTier                string       `json:"tier,omitempty"`
 	Status                     string       `json:"status"`
 	Cost                       float64      `json:"cost"`
 	Currency                   string       `json:"currency"`

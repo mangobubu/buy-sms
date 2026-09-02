@@ -43,7 +43,10 @@ type OrderDTO struct {
 	ProviderName   string    `json:"providerName,omitempty"`
 	PhoneNumber    string    `json:"phoneNumber"`
 	CountryCode    string    `json:"countryCode"`
+	CountryName    string    `json:"countryName,omitempty"`
 	ServiceCode    string    `json:"serviceCode"`
+	ServiceName    string    `json:"serviceName,omitempty"`
+	QualityTier    string    `json:"tier,omitempty"`
 	Status         string    `json:"status"`
 	Price          string    `json:"price"`
 	Currency       string    `json:"currency"`
@@ -57,9 +60,26 @@ type PurchaseInput struct {
 	Provider       string `json:"provider"`
 	CountryCode    string `json:"countryCode"`
 	ServiceCode    string `json:"serviceCode"`
+	QualityTier    string `json:"tier"`
 	MaxPrice       string `json:"maxPrice"`
 	IdempotencyKey string `json:"-"`
 }
+
+type PurchaseAttemptDTO struct {
+	Provider    string    `json:"provider"`
+	CountryCode string    `json:"countryCode"`
+	CountryName string    `json:"countryName,omitempty"`
+	ServiceCode string    `json:"serviceCode"`
+	ServiceName string    `json:"serviceName,omitempty"`
+	QualityTier string    `json:"tier,omitempty"`
+	MaxPrice    string    `json:"maxPrice"`
+	Status      string    `json:"status"`
+	ErrorCode   string    `json:"errorCode"`
+	Message     string    `json:"message"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 type OrderQuery struct {
 	Page, PageSize            int
 	Status, Provider, Keyword string
@@ -84,14 +104,22 @@ type ServiceDTO struct {
 	Available *int   `json:"available,omitempty"`
 	Price     string `json:"price,omitempty"`
 }
+
+type QuotePriceOptionDTO struct {
+	Price     string `json:"price"`
+	Available int    `json:"available"`
+}
+
 type QuoteDTO struct {
-	Provider     string `json:"provider"`
-	ProviderName string `json:"providerName"`
-	CountryCode  string `json:"countryCode"`
-	ServiceCode  string `json:"serviceCode"`
-	Price        string `json:"price"`
-	Currency     string `json:"currency"`
-	Available    int    `json:"available"`
+	Provider     string                `json:"provider"`
+	ProviderName string                `json:"providerName"`
+	CountryCode  string                `json:"countryCode"`
+	ServiceCode  string                `json:"serviceCode"`
+	QualityTier  string                `json:"tier,omitempty"`
+	Price        string                `json:"price"`
+	Currency     string                `json:"currency"`
+	Available    int                   `json:"available"`
+	PriceOptions []QuotePriceOptionDTO `json:"priceOptions,omitempty"`
 }
 
 type ProviderHealthDTO struct {
@@ -142,7 +170,7 @@ func OrderView(o domain.Order, webhook bool) OrderDTO {
 	for _, m := range o.Messages {
 		messages = append(messages, SMSDTO{ID: m.ID, Code: m.Code, Content: m.Text, ReceivedAt: m.ReceivedAt})
 	}
-	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, ServiceCode: o.ServiceCode, Status: status, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, WebhookEnabled: webhook, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Status: status, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, WebhookEnabled: webhook, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
 func UserView(u domain.User) UserDTO {
 	return UserDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Active, LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt}

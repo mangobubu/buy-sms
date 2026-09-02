@@ -52,6 +52,9 @@ func heroLegacyURL(baseURL string) string {
 func (c *HeroSMS) ID() string { return domain.ProviderHeroSMS }
 
 func (c *HeroSMS) Catalog(ctx context.Context, apiKey string, request CatalogRequest) ([]domain.CatalogItem, error) {
+	if strings.TrimSpace(request.QualityTier) != "" {
+		return nil, ErrInvalidRequest
+	}
 	if !c.native {
 		return c.legacy.Catalog(ctx, apiKey, request)
 	}
@@ -85,6 +88,9 @@ func (c *HeroSMS) Catalog(ctx context.Context, apiKey string, request CatalogReq
 }
 
 func (c *HeroSMS) Purchase(ctx context.Context, apiKey string, request PurchaseRequest) (PurchaseResult, error) {
+	if strings.TrimSpace(request.QualityTier) != "" {
+		return PurchaseResult{}, ErrInvalidRequest
+	}
 	if !c.native {
 		return c.legacy.Purchase(ctx, apiKey, request)
 	}

@@ -53,9 +53,10 @@ function safeRedirect(): string {
 }
 
 async function submit(): Promise<void> {
-  if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
+  if (loading.value || !formRef.value) return
   loading.value = true
   try {
+    if (!(await formRef.value.validate().catch(() => false))) return
     await authSession.login({
       username: form.username.trim(),
       password: form.password,
@@ -124,7 +125,6 @@ onMounted(() => {
               type="password"
               show-password
               :prefix-icon="Lock"
-              @keyup.enter="submit"
             />
           </el-form-item>
           <el-form-item label="图片验证码" prop="captcha">
@@ -134,7 +134,6 @@ onMounted(() => {
                 autocomplete="off"
                 maxlength="8"
                 placeholder="不区分大小写"
-                @keyup.enter="submit"
               />
               <button
                 type="button"

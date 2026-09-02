@@ -11,6 +11,10 @@ import { errorMessage } from '@/api/http'
 import type { NumberOrder, OrderQuery, PageResult } from '@/types/api'
 import { formatDateTime, formatMoney, providerName } from '@/utils/format'
 
+withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+})
+
 const loading = ref(false)
 const refreshing = ref(false)
 const actionOrderId = ref('')
@@ -34,6 +38,8 @@ const liveCount = computed(
 
 let pollTimer: number | undefined
 let requestInFlight = false
+let pendingReload: { silent: boolean } | null = null
+let activeLoadPromise: Promise<void> | null = null
 
 function normalizeResult(result: PageResult<NumberOrder> | NumberOrder[]): void {
   if (Array.isArray(result)) {
@@ -45,21 +51,40 @@ function normalizeResult(result: PageResult<NumberOrder> | NumberOrder[]): void 
   }
 }
 
-async function load(options: { silent?: boolean } = {}): Promise<void> {
-  if (requestInFlight) return
+async function drainLoads(initialIntent: { silent: boolean }): Promise<void> {
   requestInFlight = true
-  if (options.silent) refreshing.value = true
-  else loading.value = true
+  let intent: { silent: boolean } | null = initialIntent
   try {
-    normalizeResult(await ordersApi.list(query))
-    lastRefreshedAt.value = new Date()
-  } catch (reason) {
-    if (!options.silent) ElMessage.error(errorMessage(reason, '订单加载失败'))
+    while (intent) {
+      const currentIntent: { silent: boolean } = intent
+      pendingReload = null
+      if (currentIntent.silent) refreshing.value = true
+      else loading.value = true
+      try {
+        normalizeResult(await ordersApi.list({ ...query }))
+        lastRefreshedAt.value = new Date()
+      } catch (reason) {
+        if (!currentIntent.silent) ElMessage.error(errorMessage(reason, '订单加载失败'))
+      }
+      intent = pendingReload
+    }
   } finally {
     loading.value = false
     refreshing.value = false
     requestInFlight = false
+    pendingReload = null
+    activeLoadPromise = null
   }
+}
+
+function load(options: { silent?: boolean } = {}): Promise<void> {
+  const intent = { silent: options.silent === true }
+  if (requestInFlight && activeLoadPromise) {
+    pendingReload = { silent: (pendingReload?.silent ?? true) && intent.silent }
+    return activeLoadPromise
+  }
+  activeLoadPromise = drainLoads(intent)
+  return activeLoadPromise
 }
 
 function search(): void {
@@ -145,6 +170,16 @@ function onVisibilityChange(): void {
   if (document.visibilityState === 'visible') void load({ silent: true })
 }
 
+function revealLatest(): Promise<void> {
+  query.page = 1
+  query.status = ''
+  query.provider = ''
+  query.keyword = ''
+  return load()
+}
+
+defineExpose({ refresh: () => load({ silent: true }), revealLatest })
+
 onMounted(() => {
   void load()
   startPolling()
@@ -159,7 +194,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-stack orders-page">
-    <PageHeader title="号码订单" description="号码在完成或取消前会持续接收验证码，历史短信不会被覆盖。">
+    <PageHeader v-if="!embedded" title="号码订单" description="号码在完成或取消前会持续接收验证码，历史短信不会被覆盖。">
       <template #actions>
         <span class="live-indicator" :class="{ idle: liveCount === 0 }">
           <i /> {{ liveCount ? `${liveCount} 个号码持续收码中` : '当前无收码任务' }}
@@ -167,6 +202,19 @@ onBeforeUnmount(() => {
         <el-button :icon="Refresh" :loading="refreshing" @click="load({ silent: true })">刷新</el-button>
       </template>
     </PageHeader>
+
+    <div v-else class="orders-section-heading">
+      <div>
+        <h2>号码订单</h2>
+        <p>号码在完成或取消前会持续接收验证码，历史短信不会被覆盖。</p>
+      </div>
+      <div class="orders-section-actions">
+        <span class="live-indicator" :class="{ idle: liveCount === 0 }">
+          <i /> {{ liveCount ? `${liveCount} 个号码持续收码中` : '当前无收码任务' }}
+        </span>
+        <el-button :icon="Refresh" :loading="refreshing" @click="load({ silent: true })">刷新</el-button>
+      </div>
+    </div>
 
     <section class="content-card filter-card">
       <el-input
@@ -235,14 +283,14 @@ onBeforeUnmount(() => {
           <template #default="scope">
             <div class="phone-cell">
               <span class="phone-icon"><Cellphone /></span>
-              <span><strong>{{ scope.row.phoneNumber || '号码分配中' }}</strong><small>{{ scope.row.countryName || scope.row.countryCode }}</small></span>
+              <span><strong>{{ scope.row.phoneNumber || '号码分配中' }}</strong><small>{{ scope.row.countryName || '国家代码：' + scope.row.countryCode }}</small></span>
               <CopyButton v-if="scope.row.phoneNumber" :value="scope.row.phoneNumber" label="号码" />
             </div>
           </template>
         </el-table-column>
         <el-table-column label="供应商 / 服务" min-width="160">
           <template #default="scope">
-            <div class="stacked-cell"><strong>{{ providerName(scope.row.provider) }}</strong><small>{{ scope.row.serviceName || scope.row.serviceCode }}</small></div>
+            <div class="stacked-cell"><strong>{{ scope.row.providerName || providerName(scope.row.provider) }}</strong><small>{{ scope.row.serviceName || '服务代码：' + scope.row.serviceCode }}</small></div>
           </template>
         </el-table-column>
         <el-table-column label="验证码" min-width="110">
@@ -281,11 +329,11 @@ onBeforeUnmount(() => {
       <article v-for="order in orders" :key="order.id" class="mobile-order-card">
         <header @click="toggleMobileOrder(order.id)">
           <span class="phone-icon"><Cellphone /></span>
-          <div><strong>{{ order.phoneNumber || '号码分配中' }}</strong><small>{{ providerName(order.provider) }} · {{ order.serviceName || order.serviceCode }}</small></div>
+          <div><strong>{{ order.phoneNumber || '号码分配中' }}</strong><small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small></div>
           <OrderStatusTag :status="order.status" />
         </header>
         <div class="mobile-order-meta">
-          <span>{{ order.countryName || order.countryCode }}</span>
+          <span>{{ order.countryName || '国家代码：' + order.countryCode }}</span>
           <span>{{ formatMoney(order.price, order.currency) }}</span>
           <span>{{ order.messages?.length || 0 }} 条短信</span>
         </div>

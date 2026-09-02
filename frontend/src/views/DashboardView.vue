@@ -112,7 +112,7 @@ onMounted(load)
             <h3>最近订单</h3>
             <p>号码分配和验证码接收进度</p>
           </div>
-          <el-button link type="primary" @click="go('/orders')">查看全部 <el-icon><ArrowRight /></el-icon></el-button>
+          <el-button link type="primary" @click="go('/buy#orders')">查看全部 <el-icon><ArrowRight /></el-icon></el-button>
         </header>
 
         <div v-if="overview?.recentOrders?.length" class="recent-orders">
@@ -121,12 +121,12 @@ onMounted(load)
             :key="order.id"
             type="button"
             class="recent-order"
-            @click="go('/orders')"
+            @click="go('/buy#orders')"
           >
             <span class="provider-logo" :class="`provider-${order.provider}`">{{ providerName(order.provider).slice(0, 1) }}</span>
             <span class="recent-order-main">
               <strong>{{ order.phoneNumber || '号码分配中' }}</strong>
-              <small>{{ providerName(order.provider) }} · {{ order.serviceName || order.serviceCode }}</small>
+              <small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small>
             </span>
             <span class="recent-order-time">{{ formatDateTime(order.updatedAt || order.createdAt) }}</span>
             <span class="message-count">{{ order.messages?.length || 0 }} 条短信</span>

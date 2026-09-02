@@ -26,6 +26,9 @@ func NewSMSPool(baseURL string, options ...Option) *SMSPool {
 func (c *SMSPool) ID() string { return domain.ProviderSMSPool }
 
 func (c *SMSPool) Catalog(ctx context.Context, apiKey string, request CatalogRequest) ([]domain.CatalogItem, error) {
+	if strings.TrimSpace(request.QualityTier) != "" {
+		return nil, ErrInvalidRequest
+	}
 	if err := require(apiKey); err != nil {
 		return nil, err
 	}
@@ -71,6 +74,9 @@ func (c *SMSPool) Catalog(ctx context.Context, apiKey string, request CatalogReq
 }
 
 func (c *SMSPool) Purchase(ctx context.Context, apiKey string, request PurchaseRequest) (PurchaseResult, error) {
+	if strings.TrimSpace(request.QualityTier) != "" {
+		return PurchaseResult{}, ErrInvalidRequest
+	}
 	if err := require(apiKey, request.Country, request.Service); err != nil {
 		return PurchaseResult{}, err
 	}

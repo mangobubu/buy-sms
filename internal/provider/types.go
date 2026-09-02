@@ -48,14 +48,16 @@ type Client interface {
 }
 
 type CatalogRequest struct {
-	Kind    string
-	Country string
-	Service string
+	Kind        string
+	Country     string
+	Service     string
+	QualityTier string
 }
 
 type PurchaseRequest struct {
 	Country        string
 	Service        string
+	QualityTier    string
 	MaxPrice       *float64
 	FixedPrice     *bool
 	Pool           string

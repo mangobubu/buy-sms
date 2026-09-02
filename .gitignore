@@ -20,6 +20,7 @@
 
 # 临时文件与运行数据
 /.cache/
+/.codex-hotfix/
 /.tmp/
 /tmp/
 /data/

@@ -54,3 +54,9 @@ export function errorMessage(error: unknown, fallback = '操作失败，请稍�
   }
   return error instanceof Error ? error.message : fallback
 }
+
+export function errorCode(error: unknown): string {
+  if (!axios.isAxiosError(error)) return ''
+  const data = error.response?.data as { code?: unknown } | undefined
+  return typeof data?.code === 'string' ? data.code.trim().toLowerCase() : ''
+}

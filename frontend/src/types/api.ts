@@ -1,4 +1,5 @@
 export type ProviderCode = 'herosms' | 'smsbower' | 'smspool'
+export type SmsBowerTier = 'bronze' | 'silver' | 'gold'
 
 export interface ApiEnvelope<T> {
   code?: number
@@ -106,16 +107,39 @@ export interface Quote {
   providerName: string
   countryCode: string
   serviceCode: string
+  tier?: SmsBowerTier
   price: string
   currency: string
   available: number
+  priceOptions?: Array<{
+    price: string
+    available: number
+  }>
 }
 
 export interface PurchasePayload {
   provider: ProviderCode
   countryCode: string
   serviceCode: string
+  tier?: SmsBowerTier
   maxPrice: string
+}
+
+export type PurchaseAttemptStatus = 'provisioning' | 'succeeded' | 'failed' | 'unknown'
+
+export interface PurchaseAttempt {
+  provider: ProviderCode
+  countryCode: string
+  countryName?: string
+  serviceCode: string
+  serviceName?: string
+  tier?: SmsBowerTier
+  maxPrice: string
+  status: PurchaseAttemptStatus | string
+  errorCode: string
+  message: string
+  createdAt: string
+  updatedAt: string
 }
 
 export type OrderStatus =
@@ -143,6 +167,7 @@ export interface NumberOrder {
   countryName?: string
   serviceCode: string
   serviceName?: string
+  tier?: SmsBowerTier
   phoneNumber: string
   status: OrderStatus | string
   price: string
