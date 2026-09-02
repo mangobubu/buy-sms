@@ -1470,6 +1470,11 @@ code {
   flex-direction: column;
 }
 
+.orders-table .phone-cell > span:nth-child(2),
+.orders-table .stacked-cell {
+  gap: 2px;
+}
+
 .phone-cell strong {
   overflow: hidden;
   color: #2f3b4f;
@@ -1482,6 +1487,17 @@ code {
   margin-top: 3px;
   color: #9aa3b2;
   font-size: 9px;
+}
+
+.orders-table .phone-cell strong,
+.orders-table .stacked-cell strong {
+  line-height: 16px;
+}
+
+.orders-table .phone-cell small,
+.orders-table .stacked-cell small {
+  margin-top: 0;
+  line-height: 14px;
 }
 
 .message-cell {
