@@ -8,7 +8,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import { dashboardApi } from '@/api/dashboard'
 import { errorMessage } from '@/api/http'
 import type { DashboardOverview } from '@/types/api'
-import { formatDateTime, formatMoney, providerName } from '@/utils/format'
+import { formatDateTime, formatMoney, formatPhoneNumber, providerName } from '@/utils/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -125,7 +125,7 @@ onMounted(load)
           >
             <span class="provider-logo" :class="`provider-${order.provider}`">{{ providerName(order.provider).slice(0, 1) }}</span>
             <span class="recent-order-main">
-              <strong>{{ order.phoneNumber || '号码分配中' }}</strong>
+              <strong>{{ formatPhoneNumber(order.phoneNumber) }}</strong>
               <small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small>
             </span>
             <span class="recent-order-time">{{ formatDateTime(order.updatedAt || order.createdAt) }}</span>

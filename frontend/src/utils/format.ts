@@ -38,6 +38,34 @@ export function formatMoney(value?: string | number, currency = 'USD'): string {
   }
 }
 
+// E.164 的国际区号为 1～3 位；先匹配完整的一、二位区号，其余有效区号均为三位。
+const singleDigitCallingCodes = new Set(['1', '7'])
+const twoDigitCallingCodes = new Set([
+  '20', '27', '30', '31', '32', '33', '34', '36', '39', '40', '41', '43', '44', '45', '46', '47',
+  '48', '49', '51', '52', '53', '54', '55', '56', '57', '58', '60', '61', '62', '63', '64', '65', '66',
+  '81', '82', '84', '86', '90', '91', '92', '93', '94', '95', '98',
+])
+
+export function formatPhoneNumber(phone?: string): string {
+  if (!phone) return '号码分配中'
+
+  const trimmed = phone.trim()
+  let digits = trimmed.replace(/\D/g, '')
+  if (!digits) return trimmed || '号码分配中'
+  if (trimmed.startsWith('00')) digits = digits.slice(2)
+  if (!digits) return trimmed || '号码分配中'
+
+  const callingCodeLength = singleDigitCallingCodes.has(digits.charAt(0))
+    ? 1
+    : twoDigitCallingCodes.has(digits.slice(0, 2))
+      ? 2
+      : Math.min(3, digits.length)
+  const callingCode = digits.slice(0, callingCodeLength)
+  const localGroups = digits.slice(callingCodeLength).match(/.{1,3}/g) ?? []
+
+  return [`+${callingCode}`, ...localGroups].join(' ')
+}
+
 export function maskPhone(phone?: string): string {
   return phone || '号码分配中'
 }

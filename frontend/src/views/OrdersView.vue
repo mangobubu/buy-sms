@@ -9,7 +9,7 @@ import OrderStatusTag from '@/components/OrderStatusTag.vue'
 import { ordersApi } from '@/api/orders'
 import { errorMessage } from '@/api/http'
 import type { NumberOrder, OrderQuery, PageResult } from '@/types/api'
-import { formatDateTime, formatMoney, providerName } from '@/utils/format'
+import { formatDateTime, formatMoney, formatPhoneNumber, providerName } from '@/utils/format'
 
 withDefaults(defineProps<{ embedded?: boolean }>(), {
   embedded: false,
@@ -103,7 +103,7 @@ function resetFilters(): void {
 async function completeOrder(order: NumberOrder): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `完成后将停止号码 ${order.phoneNumber || order.id} 的持续收码，确认已经获取到所需的全部验证码吗？`,
+      `完成后将停止号码 ${order.phoneNumber ? formatPhoneNumber(order.phoneNumber) : order.id} 的持续收码，确认已经获取到所需的全部验证码吗？`,
       '完成并结算订单',
       { confirmButtonText: '确认完成', cancelButtonText: '继续收码', type: 'warning' },
     )
@@ -125,7 +125,7 @@ async function completeOrder(order: NumberOrder): Promise<void> {
 async function cancelOrder(order: NumberOrder): Promise<void> {
   try {
     await ElMessageBox.confirm(
-      `取消后将停止号码 ${order.phoneNumber || order.id} 的持续收码，该操作通常不可撤销。`,
+      `取消后将停止号码 ${order.phoneNumber ? formatPhoneNumber(order.phoneNumber) : order.id} 的持续收码，该操作通常不可撤销。`,
       '取消号码',
       { confirmButtonText: '确认取消', cancelButtonText: '保留号码', type: 'warning' },
     )
@@ -283,7 +283,7 @@ onBeforeUnmount(() => {
           <template #default="scope">
             <div class="phone-cell">
               <span class="phone-icon"><Cellphone /></span>
-              <span><strong>{{ scope.row.phoneNumber || '号码分配中' }}</strong><small>{{ scope.row.countryName || '国家代码：' + scope.row.countryCode }}</small></span>
+              <span><strong>{{ formatPhoneNumber(scope.row.phoneNumber) }}</strong><small>{{ scope.row.countryName || '国家代码：' + scope.row.countryCode }}</small></span>
               <CopyButton v-if="scope.row.phoneNumber" :value="scope.row.phoneNumber" label="号码" />
             </div>
           </template>
@@ -329,7 +329,7 @@ onBeforeUnmount(() => {
       <article v-for="order in orders" :key="order.id" class="mobile-order-card">
         <header @click="toggleMobileOrder(order.id)">
           <span class="phone-icon"><Cellphone /></span>
-          <div><strong>{{ order.phoneNumber || '号码分配中' }}</strong><small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small></div>
+          <div><strong>{{ formatPhoneNumber(order.phoneNumber) }}</strong><small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small></div>
           <OrderStatusTag :status="order.status" />
         </header>
         <div class="mobile-order-meta">

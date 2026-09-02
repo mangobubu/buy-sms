@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { Check, Refresh, ShoppingCart } from '@element-plus/icons-vue'
@@ -8,19 +8,17 @@ import OrdersView from '@/views/OrdersView.vue'
 import { providersApi } from '@/api/providers'
 import { catalogApi } from '@/api/catalog'
 import { ordersApi } from '@/api/orders'
-import { purchaseAttemptsApi } from '@/api/purchase-attempts'
 import { errorCode, errorMessage } from '@/api/http'
 import { authSession } from '@/stores/auth'
 import type {
   CountryOption,
-  PurchaseAttempt,
   ProviderCode,
   ProviderConfig,
   Quote,
   ServiceOption,
   SmsBowerTier,
 } from '@/types/api'
-import { formatDateTime, formatMoney, providerName } from '@/utils/format'
+import { formatMoney, providerName } from '@/utils/format'
 
 const formRef = ref<FormInstance>()
 const ordersRef = ref<InstanceType<typeof OrdersView>>()
@@ -46,148 +44,112 @@ const TERMINAL_PURCHASE_FAILURE_CODES = new Set([
 const providers = ref<ProviderConfig[]>([])
 const countries = ref<CountryOption[]>([])
 const services = ref<ServiceOption[]>([])
-const quote = ref<Quote | null>(null)
-const purchaseAttempts = ref<PurchaseAttempt[]>([])
-const loadingPurchaseAttempts = ref(false)
-const refreshingPurchaseAttempts = ref(false)
-const purchaseAttemptsError = ref('')
-const tierOptions: { value: SmsBowerTier; label: string; caption: string }[] = [
-  { value: 'bronze', label: 'Bronze', caption: '青铜级' },
-  { value: 'silver', label: 'Silver', caption: '白银级' },
-  { value: 'gold', label: 'Gold', caption: '黄金级' },
+const quotes = ref<Quote[]>([])
+const smsBowerTiers: { value: SmsBowerTier; label: string }[] = [
+  { value: 'bronze', label: 'Bronze' },
+  { value: 'silver', label: 'Silver' },
+  { value: 'gold', label: 'Gold' },
 ]
 
 let servicesGeneration = 0
 let countriesGeneration = 0
 let quoteGeneration = 0
-let purchaseAttemptsPollTimer: number | undefined
-let purchaseAttemptsLoadPromise: Promise<void> | null = null
-let purchaseAttemptsPendingReload: { silent: boolean } | null = null
-let purchaseAttemptsActive = false
+let providerRestoreGeneration = 0
+const restoringProviderSelection = ref(false)
 
 const form = reactive({
   provider: '' as ProviderCode | '',
   serviceCode: '',
   tier: '' as SmsBowerTier | '',
   countryCode: '',
+  priceSelection: '',
   maxPrice: '',
 })
 
 const rules: FormRules = {
   provider: [{ required: true, message: '请选择供应商', trigger: 'change' }],
   serviceCode: [{ required: true, message: '请选择接码服务', trigger: 'change' }],
-  tier: [
-    {
-      validator: (_rule, value, callback) =>
-        form.provider !== 'smsbower' || value ? callback() : callback(new Error('请选择号码等级')),
-      trigger: 'change',
-    },
-  ],
   countryCode: [{ required: true, message: '请选择国家或地区', trigger: 'change' }],
-  maxPrice: [{ required: true, message: '请选择价格', trigger: 'change' }],
+  priceSelection: [{ required: true, message: '请选择价格', trigger: 'change' }],
 }
 
 const enabledProviders = computed(() => providers.value.filter((item) => item.enabled))
-const isSmsBower = computed(() => form.provider === 'smsbower')
+interface DisplayPriceOption {
+  key: string
+  price: string
+  available: number
+  currency: string
+  tier?: SmsBowerTier
+}
+
+interface ProviderSelection {
+  serviceCode: string
+  tier: SmsBowerTier | ''
+  countryCode: string
+  priceSelection: string
+  maxPrice: string
+}
+
+const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
+
+function priceOptionKey(tier: SmsBowerTier | undefined, price: string): string {
+  return `${tier || 'standard'}:${price}`
+}
+
 const priceOptions = computed(() => {
-  if (!quote.value) return []
-  const options = quote.value.priceOptions?.length
-    ? quote.value.priceOptions
-    : [{ price: quote.value.price, available: quote.value.available }]
-  return options.map((option) => ({ ...option, currency: quote.value?.currency || 'USD' }))
+  return quotes.value.flatMap((currentQuote) => {
+    const options = currentQuote.priceOptions?.length
+      ? currentQuote.priceOptions
+      : [{ price: currentQuote.price, available: currentQuote.available }]
+    return options.map<DisplayPriceOption>((option) => ({
+      ...option,
+      key: priceOptionKey(currentQuote.tier, option.price),
+      currency: currentQuote.currency || 'USD',
+      tier: currentQuote.tier,
+    }))
+  })
 })
 const selectedPriceOption = computed(() =>
-  priceOptions.value.find((option) => option.price === form.maxPrice),
-)
-const hasPendingPurchaseAttempts = computed(() =>
-  purchaseAttempts.value.some((attempt) => attempt.status.toLowerCase() === 'provisioning'),
+  priceOptions.value.find((option) => option.key === form.priceSelection),
 )
 
-function purchaseAttemptStatusLabel(status: string): string {
-  switch (status.toLowerCase()) {
-    case 'provisioning': return '处理中'
-    case 'succeeded': return '购买成功'
-    case 'failed': return '购买失败'
-    case 'unknown': return '结果待确认'
-    default: return '状态更新中'
+function smsBowerTierLabel(tier?: SmsBowerTier): string {
+  return smsBowerTiers.find((option) => option.value === tier)?.label || ''
+}
+
+function priceOptionLabel(option: DisplayPriceOption): string {
+  const price = formatMoney(option.price, option.currency)
+  return option.tier ? `${smsBowerTierLabel(option.tier)} · ${price}` : price
+}
+
+function snapshotSelection(): ProviderSelection {
+  return {
+    serviceCode: form.serviceCode,
+    tier: form.tier,
+    countryCode: form.countryCode,
+    priceSelection: form.priceSelection,
+    maxPrice: form.maxPrice,
   }
 }
 
-function purchaseAttemptStatusTone(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
-  switch (status.toLowerCase()) {
-    case 'provisioning': return 'primary'
-    case 'succeeded': return 'success'
-    case 'failed': return 'danger'
-    case 'unknown': return 'warning'
-    default: return 'info'
-  }
+function saveCurrentSelection(provider = form.provider): void {
+  if (provider) providerSelections[provider] = snapshotSelection()
 }
 
-function purchaseAttemptTierLabel(tier?: SmsBowerTier): string {
-  return tier ? tier.charAt(0).toUpperCase() + tier.slice(1) : '—'
+function clearPriceSelection(): void {
+  form.tier = ''
+  form.priceSelection = ''
+  form.maxPrice = ''
+  quotes.value = []
 }
 
-function stopPurchaseAttemptsPolling(): void {
-  if (purchaseAttemptsPollTimer) window.clearInterval(purchaseAttemptsPollTimer)
-  purchaseAttemptsPollTimer = undefined
-}
-
-function syncPurchaseAttemptsPolling(): void {
-  if (!purchaseAttemptsActive || document.visibilityState !== 'visible' || !hasPendingPurchaseAttempts.value) {
-    stopPurchaseAttemptsPolling()
-    return
-  }
-  if (purchaseAttemptsPollTimer) return
-  purchaseAttemptsPollTimer = window.setInterval(() => {
-    void loadPurchaseAttempts({ silent: true })
-  }, 10_000)
-}
-
-async function performPurchaseAttemptsLoad(initialIntent: { silent: boolean }): Promise<void> {
-  let intent: { silent: boolean } | null = initialIntent
-  try {
-    while (intent) {
-      const currentIntent: { silent: boolean } = intent
-      purchaseAttemptsPendingReload = null
-      const blocking = !currentIntent.silent && purchaseAttempts.value.length === 0
-      if (blocking) loadingPurchaseAttempts.value = true
-      else refreshingPurchaseAttempts.value = true
-      try {
-        purchaseAttempts.value = (await purchaseAttemptsApi.list()).slice(0, 20)
-        purchaseAttemptsError.value = ''
-      } catch (reason) {
-        purchaseAttemptsError.value = errorMessage(reason, '最近购买记录加载失败')
-      }
-      intent = purchaseAttemptsPendingReload
-    }
-  } finally {
-    loadingPurchaseAttempts.value = false
-    refreshingPurchaseAttempts.value = false
-    purchaseAttemptsLoadPromise = null
-    purchaseAttemptsPendingReload = null
-    syncPurchaseAttemptsPolling()
-  }
-}
-
-function loadPurchaseAttempts(options: { silent?: boolean } = {}): Promise<void> {
-  const intent = { silent: options.silent === true }
-  if (purchaseAttemptsLoadPromise) {
-    purchaseAttemptsPendingReload = {
-      silent: (purchaseAttemptsPendingReload?.silent ?? true) && intent.silent,
-    }
-    return purchaseAttemptsLoadPromise
-  }
-  purchaseAttemptsLoadPromise = performPurchaseAttemptsLoad(intent)
-  return purchaseAttemptsLoadPromise
-}
-
-function onPurchaseAttemptsVisibilityChange(): void {
-  if (document.visibilityState !== 'visible') {
-    stopPurchaseAttemptsPolling()
-    return
-  }
-  if (hasPendingPurchaseAttempts.value) void loadPurchaseAttempts({ silent: true })
-  else syncPurchaseAttemptsPolling()
+function selectPrice(selection: string): void {
+  form.priceSelection = selection
+  const option = priceOptions.value.find((item) => item.key === selection)
+  form.tier = option?.tier || ''
+  form.maxPrice = option?.price || ''
+  purchaseIdempotencyKey.value = ''
+  saveCurrentSelection()
 }
 
 async function loadProviders(): Promise<void> {
@@ -202,67 +164,137 @@ async function loadProviders(): Promise<void> {
   }
 }
 
-async function loadServices(provider: ProviderCode): Promise<void> {
+async function loadServices(provider: ProviderCode): Promise<ServiceOption[] | null> {
   const generation = ++servicesGeneration
   loadingServices.value = true
   try {
     const result = await catalogApi.services(provider)
-    if (generation !== servicesGeneration || form.provider !== provider) return
+    if (generation !== servicesGeneration || form.provider !== provider) return null
     services.value = result
+    return result
   } catch (reason) {
     if (generation === servicesGeneration) ElMessage.error(errorMessage(reason, '服务列表加载失败'))
+    return null
   } finally {
     if (generation === servicesGeneration) loadingServices.value = false
   }
 }
 
-async function loadCountries(): Promise<void> {
-  if (!form.provider || !form.serviceCode || (isSmsBower.value && !form.tier)) return
+function mergeCountries(groups: CountryOption[][]): CountryOption[] {
+  const merged = new Map<string, CountryOption>()
+  for (const group of groups) {
+    for (const country of group) {
+      const existing = merged.get(country.code)
+      if (!existing) {
+        merged.set(country.code, { ...country })
+        continue
+      }
+      if (!existing.name && country.name) existing.name = country.name
+      if (!existing.flag && country.flag) existing.flag = country.flag
+      if (country.available !== undefined) existing.available = (existing.available ?? 0) + country.available
+    }
+  }
+  return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+}
+
+async function loadCountries(): Promise<CountryOption[] | null> {
+  if (!form.provider || !form.serviceCode) return null
   const provider = form.provider
   const service = form.serviceCode
-  const tier = form.tier || undefined
   const generation = ++countriesGeneration
   loadingCountries.value = true
   try {
-    const result = await catalogApi.countries(provider, service, tier)
-    if (
-      generation !== countriesGeneration ||
-      form.provider !== provider ||
-      form.serviceCode !== service ||
-      (form.tier || undefined) !== tier
-    ) return
+    let result: CountryOption[]
+    let loadedTierCount = smsBowerTiers.length
+    if (provider === 'smsbower') {
+      const settled = await Promise.allSettled(
+        smsBowerTiers.map(({ value }) => catalogApi.countries(provider, service, value)),
+      )
+      const succeeded = settled
+        .filter((entry): entry is PromiseFulfilledResult<CountryOption[]> => entry.status === 'fulfilled')
+        .map((entry) => entry.value)
+      if (!succeeded.length) throw settled.find((entry) => entry.status === 'rejected')?.reason
+      loadedTierCount = succeeded.length
+      result = mergeCountries(succeeded)
+    } else {
+      result = await catalogApi.countries(provider, service)
+    }
+    if (generation !== countriesGeneration || form.provider !== provider || form.serviceCode !== service) return null
     countries.value = result
+    if (provider === 'smsbower' && loadedTierCount < smsBowerTiers.length) {
+      ElMessage.warning('部分号码等级的国家暂未加载')
+    }
+    return result
   } catch (reason) {
     if (generation === countriesGeneration) ElMessage.error(errorMessage(reason, '国家列表加载失败'))
+    return null
   } finally {
     if (generation === countriesGeneration) loadingCountries.value = false
   }
 }
 
-async function loadQuote(): Promise<void> {
-  if (!form.provider || !form.countryCode || !form.serviceCode) return
+async function loadQuote(): Promise<Quote[] | null> {
+  if (!form.provider || !form.countryCode || !form.serviceCode) return null
   const provider = form.provider
   const country = form.countryCode
   const service = form.serviceCode
-  const tier = form.tier || undefined
+  const savedSelection = form.priceSelection
   const generation = ++quoteGeneration
   loadingQuote.value = true
-  quote.value = null
   try {
-    const result = await catalogApi.quote(provider, country, service, tier)
+    let result: Quote[]
+    if (provider === 'smsbower') {
+      const settled = await Promise.allSettled(
+        smsBowerTiers.map(async ({ value }) => ({ ...(await catalogApi.quote(provider, country, service, value)), tier: value })),
+      )
+      result = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : [])
+      if (!result.length) throw settled.find((entry) => entry.status === 'rejected')?.reason
+    } else {
+      result = [await catalogApi.quote(provider, country, service)]
+    }
     if (
       generation !== quoteGeneration ||
       form.provider !== provider ||
       form.countryCode !== country ||
-      form.serviceCode !== service ||
-      (form.tier || undefined) !== tier
-    ) return
-    quote.value = result
-    form.maxPrice = result.priceOptions?.[0]?.price ?? result.price
+      form.serviceCode !== service
+    ) return null
+    quotes.value = result
+    if (provider === 'smsbower' && result.length < smsBowerTiers.length) {
+      ElMessage.warning('部分号码等级的价格暂未加载')
+    }
+    const nextSelection = priceOptions.value.some((option) => option.key === savedSelection)
+      ? savedSelection
+      : priceOptions.value[0]?.key || ''
+    selectPrice(nextSelection)
+    return result
   } catch (reason) {
     if (generation === quoteGeneration) ElMessage.error(errorMessage(reason, '报价加载失败'))
+    return null
   } finally {
     if (generation === quoteGeneration) loadingQuote.value = false
+  }
+}
+
+async function restoreProviderSelection(provider: ProviderCode, selection?: ProviderSelection): Promise<void> {
+  const generation = ++providerRestoreGeneration
+  restoringProviderSelection.value = true
+  try {
+    const loadedServices = await loadServices(provider)
+    if (generation !== providerRestoreGeneration || form.provider !== provider || !loadedServices) return
+    if (!selection || !loadedServices.some((service) => service.code === selection.serviceCode)) return
+
+    form.serviceCode = selection.serviceCode
+    const loadedCountries = await loadCountries()
+    if (generation !== providerRestoreGeneration || form.provider !== provider || !loadedCountries) return
+    if (!loadedCountries.some((country) => country.code === selection.countryCode)) return
+
+    form.countryCode = selection.countryCode
+    form.priceSelection = selection.priceSelection
+    await loadQuote()
+  } finally {
+    if (generation === providerRestoreGeneration) {
+      restoringProviderSelection.value = false
+    }
   }
 }
 
@@ -270,6 +302,7 @@ watch(
   () => form.provider,
   (provider) => {
     purchaseIdempotencyKey.value = ''
+    providerRestoreGeneration += 1
     servicesGeneration += 1
     countriesGeneration += 1
     quoteGeneration += 1
@@ -279,65 +312,43 @@ watch(
     form.serviceCode = ''
     form.tier = ''
     form.countryCode = ''
+    form.priceSelection = ''
     form.maxPrice = ''
     services.value = []
     countries.value = []
-    quote.value = null
-    if (provider) void loadServices(provider)
+    quotes.value = []
+    restoringProviderSelection.value = false
+    if (provider) void restoreProviderSelection(provider, providerSelections[provider])
   },
 )
 
 watch(
   () => form.serviceCode,
   (service) => {
-    purchaseIdempotencyKey.value = ''
-    countriesGeneration += 1
-    quoteGeneration += 1
-    loadingCountries.value = false
-    loadingQuote.value = false
-    const nextTier: SmsBowerTier | '' = isSmsBower.value && service ? 'gold' : ''
-    const tierChanged = form.tier !== nextTier
-    form.tier = nextTier
-    form.countryCode = ''
-    form.maxPrice = ''
-    countries.value = []
-    quote.value = null
-    if (service && !tierChanged) void loadCountries()
-  },
-)
-
-watch(
-  () => form.tier,
-  (tier) => {
+    if (restoringProviderSelection.value) return
     purchaseIdempotencyKey.value = ''
     countriesGeneration += 1
     quoteGeneration += 1
     loadingCountries.value = false
     loadingQuote.value = false
     form.countryCode = ''
-    form.maxPrice = ''
     countries.value = []
-    quote.value = null
-    if (form.serviceCode && (!isSmsBower.value || tier)) void loadCountries()
+    clearPriceSelection()
+    saveCurrentSelection()
+    if (service) void loadCountries()
   },
 )
 
 watch(
   () => form.countryCode,
   (country) => {
+    if (restoringProviderSelection.value) return
     purchaseIdempotencyKey.value = ''
     quoteGeneration += 1
     loadingQuote.value = false
-    form.maxPrice = ''
-    quote.value = null
+    clearPriceSelection()
+    saveCurrentSelection()
     if (country) void loadQuote()
-  },
-)
-
-watch(
-  () => form.maxPrice,
-  () => {
-    purchaseIdempotencyKey.value = ''
   },
 )
 
@@ -459,36 +470,20 @@ async function purchase(): Promise<void> {
     )
     clearPersistedPurchase(requestStorageKey, requestSignature)
     ElMessage.success('号码购买成功，已开始持续接收验证码')
-    form.serviceCode = ''
-    form.tier = ''
-    form.countryCode = ''
-    form.maxPrice = ''
-    quote.value = null
     formRef.value?.clearValidate()
-    await Promise.all([ordersRef.value?.revealLatest(), loadPurchaseAttempts({ silent: true })])
+    saveCurrentSelection()
+    await Promise.all([ordersRef.value?.revealLatest(), loadQuote()])
   } catch (reason) {
     if (requestStorageKey && requestSignature && TERMINAL_PURCHASE_FAILURE_CODES.has(errorCode(reason))) {
       clearPersistedPurchase(requestStorageKey, requestSignature)
     }
     ElMessage.error(errorMessage(reason, '购买失败，请调整条件后重试'))
-    await loadPurchaseAttempts({ silent: true })
   } finally {
     purchasing.value = false
   }
 }
 
-onMounted(() => {
-  purchaseAttemptsActive = true
-  void loadProviders()
-  void loadPurchaseAttempts()
-  document.addEventListener('visibilitychange', onPurchaseAttemptsVisibilityChange)
-})
-
-onBeforeUnmount(() => {
-  purchaseAttemptsActive = false
-  stopPurchaseAttemptsPolling()
-  document.removeEventListener('visibilitychange', onPurchaseAttemptsVisibilityChange)
-})
+onMounted(loadProviders)
 </script>
 
 <template>
@@ -530,7 +525,7 @@ onBeforeUnmount(() => {
               v-model="form.serviceCode"
               filterable
               :loading="loadingServices"
-              :disabled="!form.provider"
+              :disabled="!form.provider || restoringProviderSelection"
               placeholder="请先选择接码服务"
               style="width: 100%"
             >
@@ -541,31 +536,12 @@ onBeforeUnmount(() => {
             </el-select>
           </el-form-item>
 
-          <el-form-item v-if="isSmsBower" label="号码等级" prop="tier">
-            <div class="tier-selector">
-              <button
-                v-for="tier in tierOptions"
-                :key="tier.value"
-                type="button"
-                class="tier-option"
-                :class="[`tier-${tier.value}`, { selected: form.tier === tier.value }]"
-                :disabled="!form.serviceCode"
-                @click="form.tier = tier.value"
-              >
-                <span class="tier-dot" />
-                <span><strong>{{ tier.label }}</strong><small>{{ tier.caption }}</small></span>
-                <el-icon class="option-check"><Check /></el-icon>
-              </button>
-            </div>
-            <p class="form-help">Gold 为默认等级；切换等级后会重新加载对应国家与报价。</p>
-          </el-form-item>
-
           <el-form-item label="国家或地区" prop="countryCode">
             <el-select
               v-model="form.countryCode"
               filterable
               :loading="loadingCountries"
-              :disabled="!form.serviceCode || (isSmsBower && !form.tier)"
+              :disabled="!form.serviceCode || restoringProviderSelection"
               placeholder="请先选择服务，再选择国家或地区"
               style="width: 100%"
             >
@@ -576,25 +552,29 @@ onBeforeUnmount(() => {
             </el-select>
           </el-form-item>
 
-          <el-form-item label="选择价格" prop="maxPrice">
+          <el-form-item label="选择价格" prop="priceSelection">
             <el-select
-              v-model="form.maxPrice"
+              :model-value="form.priceSelection"
               :loading="loadingQuote"
-              :disabled="!quote"
+              :disabled="!priceOptions.length || loadingQuote"
               placeholder="选择国家后加载价格"
               style="width: 100%"
+              @change="selectPrice"
             >
               <el-option
                 v-for="priceQuote in priceOptions"
-                :key="priceQuote.price"
-                :label="formatMoney(priceQuote.price, priceQuote.currency)"
-                :value="priceQuote.price"
+                :key="priceQuote.key"
+                :label="priceOptionLabel(priceQuote)"
+                :value="priceQuote.key"
               >
-                <span class="select-option-main">{{ formatMoney(priceQuote.price, priceQuote.currency) }}</span>
+                <span class="select-option-main">{{ priceOptionLabel(priceQuote) }}</span>
                 <small>{{ priceQuote.available }} 个可用</small>
               </el-option>
             </el-select>
-            <p class="form-help">请选择要购买的价格，可用数量随价格档位变化。</p>
+            <p v-if="form.provider === 'smsbower'" class="form-help">
+              Bronze、Silver、Gold 等级已包含在价格选项中，可用数量随价格档位变化。
+            </p>
+            <p v-else class="form-help">请选择要购买的价格，可用数量随价格档位变化。</p>
           </el-form-item>
 
           <div class="purchase-form-actions">
@@ -613,63 +593,6 @@ onBeforeUnmount(() => {
           </div>
         </el-form>
       </article>
-    </section>
-
-    <section class="content-card purchase-attempts-card" aria-labelledby="purchase-attempts-title">
-      <header class="purchase-attempts-heading">
-        <div>
-          <h2 id="purchase-attempts-title">最近购买尝试</h2>
-          <p>直接查看购买处理状态和失败原因，无需手动查询数据库。</p>
-        </div>
-        <el-button
-          :icon="Refresh"
-          :loading="refreshingPurchaseAttempts"
-          @click="loadPurchaseAttempts({ silent: true })"
-        >
-          刷新状态
-        </el-button>
-      </header>
-
-      <el-alert
-        v-if="purchaseAttemptsError"
-        class="purchase-attempts-error"
-        type="error"
-        :title="purchaseAttemptsError"
-        :closable="false"
-        show-icon
-      />
-
-      <div v-loading="loadingPurchaseAttempts" class="purchase-attempts-body">
-        <el-empty
-          v-if="!loadingPurchaseAttempts && !purchaseAttempts.length"
-          description="暂无购买尝试"
-          :image-size="54"
-        />
-        <div v-else class="purchase-attempts-list">
-          <article
-            v-for="(attempt, index) in purchaseAttempts"
-            :key="`${attempt.createdAt}-${attempt.provider}-${attempt.serviceCode}-${index}`"
-            class="purchase-attempt-item"
-          >
-            <div class="purchase-attempt-main">
-              <div class="purchase-attempt-title">
-                <strong>{{ providerName(attempt.provider) }}</strong>
-                <el-tag size="small" effect="light" :type="purchaseAttemptStatusTone(attempt.status)">
-                  {{ purchaseAttemptStatusLabel(attempt.status) }}
-                </el-tag>
-              </div>
-              <p>{{ attempt.message }}</p>
-            </div>
-            <dl class="purchase-attempt-meta">
-              <div><dt>服务</dt><dd>{{ attempt.serviceName || '服务代码：' + attempt.serviceCode }}</dd></div>
-              <div><dt>国家</dt><dd>{{ attempt.countryName || '国家代码：' + attempt.countryCode }}</dd></div>
-              <div v-if="attempt.tier"><dt>等级</dt><dd>{{ purchaseAttemptTierLabel(attempt.tier) }}</dd></div>
-              <div><dt>价格</dt><dd>{{ formatMoney(attempt.maxPrice, 'USD') }}</dd></div>
-              <div><dt>请求时间</dt><dd>{{ formatDateTime(attempt.createdAt) }}</dd></div>
-            </dl>
-          </article>
-        </div>
-      </div>
     </section>
 
     <OrdersView id="orders" ref="ordersRef" embedded />

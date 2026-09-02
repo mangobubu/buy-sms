@@ -62,7 +62,7 @@ npm run build
 | PUT | `/users/:id` | 更新用户 |
 
 供应商规范代码为 `herosms`、`smsbower`、`smspool`。完整 DTO 位于 `src/types/api.ts`。
-购买页统一先选服务再选国家；选择 SMSBower 时还需在国家之前选择 `gold`、`silver` 或 `bronze`，默认 `gold`。
+购买页统一先选服务再选国家。SMSBower 会合并 `bronze`、`silver`、`gold` 三个等级的可用资源，并在价格选项中展示等级；选择价格时会同时确定下单等级，无需单独选择。切换供应商时，页面会分别保留各供应商当前的服务、国家和价格选择。
 
 ## 持续收码规则
 
