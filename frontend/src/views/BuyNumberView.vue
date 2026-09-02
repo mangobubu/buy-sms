@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { Check, Refresh, ShoppingCart } from '@element-plus/icons-vue'
@@ -12,6 +12,7 @@ import { errorCode, errorMessage } from '@/api/http'
 import { authSession } from '@/stores/auth'
 import type {
   CountryOption,
+  ProviderBalance,
   ProviderCode,
   ProviderConfig,
   Quote,
@@ -23,12 +24,13 @@ import { formatMoney, providerName } from '@/utils/format'
 const formRef = ref<FormInstance>()
 const ordersRef = ref<InstanceType<typeof OrdersView>>()
 const loadingProviders = ref(false)
+const loadingBalances = ref(false)
 const loadingCountries = ref(false)
 const loadingServices = ref(false)
 const loadingQuote = ref(false)
 const purchasing = ref(false)
-const purchaseIdempotencyKey = ref('')
 const PURCHASE_INTENT_KEY = 'buy_sms_purchase_intent'
+const FORM_SELECTION_KEY = 'buy_sms_form_selection'
 const TERMINAL_PURCHASE_FAILURE_CODES = new Set([
   'configuration',
   'idempotency_mismatch',
@@ -42,6 +44,7 @@ const TERMINAL_PURCHASE_FAILURE_CODES = new Set([
   'purchase_setup_failed',
 ])
 const providers = ref<ProviderConfig[]>([])
+const providerBalances = ref<Partial<Record<ProviderCode, ProviderBalance>>>({})
 const countries = ref<CountryOption[]>([])
 const services = ref<ServiceOption[]>([])
 const quotes = ref<Quote[]>([])
@@ -55,6 +58,9 @@ let servicesGeneration = 0
 let countriesGeneration = 0
 let quoteGeneration = 0
 let providerRestoreGeneration = 0
+let balanceRefreshTimer: number | undefined
+let balanceAbortController: AbortController | undefined
+let disposed = false
 const restoringProviderSelection = ref(false)
 
 const form = reactive({
@@ -74,6 +80,19 @@ const rules: FormRules = {
 }
 
 const enabledProviders = computed(() => providers.value.filter((item) => item.enabled))
+
+function providerBalanceText(provider: ProviderConfig): string {
+  if (!provider.enabled) return '接口未启用 · 余额 —'
+  const current = providerBalances.value[provider.code]
+  if (!current && loadingBalances.value) return '接口已启用 · 余额查询中'
+  if (current?.status === 'ok' && current.balance !== undefined) {
+    return `接口已启用 · 余额 ${formatMoney(current.balance, current.currency || 'USD')}`
+  }
+  if (current?.status === 'unconfigured') return '接口不可用 · 余额 —'
+  if (current?.status === 'timeout') return '接口已启用 · 余额查询超时'
+  if (current?.status === 'unavailable') return '接口已启用 · 余额暂不可用'
+  return '接口已启用 · 余额查询中'
+}
 interface DisplayPriceOption {
   key: string
   price: string
@@ -90,6 +109,12 @@ interface ProviderSelection {
   maxPrice: string
 }
 
+interface PersistedProviderSelection {
+  serviceCode: string
+  countryCode: string
+}
+
+const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool']
 const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
 
 function priceOptionKey(tier: SmsBowerTier | undefined, price: string): string {
@@ -132,8 +157,73 @@ function snapshotSelection(): ProviderSelection {
   }
 }
 
+function formSelectionStorageKey(): string {
+  const userID = authSession.state.user?.id
+  return userID ? `${FORM_SELECTION_KEY}:${userID}` : ''
+}
+
+function isProviderCode(value: unknown): value is ProviderCode {
+  return typeof value === 'string' && providerCodes.includes(value as ProviderCode)
+}
+
+function readPersistedFormSelections(): ProviderCode | '' {
+  const storageKey = formSelectionStorageKey()
+  if (!storageKey) return ''
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(storageKey) ?? '{}') as {
+      provider?: unknown
+      selections?: Record<string, unknown>
+    }
+    if (parsed.selections && typeof parsed.selections === 'object') {
+      for (const provider of providerCodes) {
+        const raw = parsed.selections[provider]
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+        const selection = raw as { serviceCode?: unknown; countryCode?: unknown }
+        const serviceCode = typeof selection.serviceCode === 'string' ? selection.serviceCode : ''
+        const countryCode = typeof selection.countryCode === 'string' ? selection.countryCode : ''
+        providerSelections[provider] = {
+          serviceCode,
+          countryCode,
+          tier: '',
+          priceSelection: '',
+          maxPrice: '',
+        }
+      }
+    }
+    return isProviderCode(parsed.provider) ? parsed.provider : ''
+  } catch {
+    try {
+      sessionStorage.removeItem(storageKey)
+    } catch {
+      // 会话存储整体不可用时回退为当前页面内状态。
+    }
+    return ''
+  }
+}
+
+function persistFormSelections(): void {
+  const storageKey = formSelectionStorageKey()
+  if (!storageKey || !form.provider) return
+  const selections: Partial<Record<ProviderCode, PersistedProviderSelection>> = {}
+  for (const provider of providerCodes) {
+    const selection = providerSelections[provider]
+    if (!selection) continue
+    selections[provider] = {
+      serviceCode: selection.serviceCode,
+      countryCode: selection.countryCode,
+    }
+  }
+  try {
+    sessionStorage.setItem(storageKey, JSON.stringify({ provider: form.provider, selections }))
+  } catch {
+    // 会话存储不可用时仍保留当前页面内的选择。
+  }
+}
+
 function saveCurrentSelection(provider = form.provider): void {
-  if (provider) providerSelections[provider] = snapshotSelection()
+  if (!provider) return
+  providerSelections[provider] = snapshotSelection()
+  persistFormSelections()
 }
 
 function clearPriceSelection(): void {
@@ -148,20 +238,73 @@ function selectPrice(selection: string): void {
   const option = priceOptions.value.find((item) => item.key === selection)
   form.tier = option?.tier || ''
   form.maxPrice = option?.price || ''
-  purchaseIdempotencyKey.value = ''
   saveCurrentSelection()
 }
 
 async function loadProviders(): Promise<void> {
   loadingProviders.value = true
   try {
-    providers.value = await providersApi.list()
+    const result = await providersApi.list()
+    if (disposed) return
+    providers.value = result
+    if (form.provider && !enabledProviders.value.some((item) => item.code === form.provider)) form.provider = ''
+    if (!form.provider) {
+      const persistedProvider = readPersistedFormSelections()
+      const preferredProvider = enabledProviders.value.find((item) => item.code === persistedProvider)
+      const nextProvider = preferredProvider || enabledProviders.value[0]
+      if (nextProvider) form.provider = nextProvider.code
+    }
+  } catch (reason) {
+    if (!disposed) ElMessage.error(errorMessage(reason, '供应商加载失败'))
+  } finally {
+    if (!disposed) loadingProviders.value = false
+  }
+}
+
+async function loadProviderBalances(notify = false): Promise<void> {
+  if (disposed || loadingBalances.value || document.hidden || !navigator.onLine) return
+  loadingBalances.value = true
+  const controller = new AbortController()
+  balanceAbortController = controller
+  try {
+    const result = await providersApi.balances(controller.signal)
+    if (disposed) return
+    providerBalances.value = Object.fromEntries(result.map((item) => [item.code, item]))
+    const enabled = new Map(result.map((item) => [item.code, item.enabled]))
+    providers.value = providers.value.map((item) =>
+      enabled.has(item.code) ? { ...item, enabled: enabled.get(item.code)! } : item,
+    )
+    if (form.provider && !providers.value.some((item) => item.code === form.provider && item.enabled)) form.provider = ''
     if (!form.provider && enabledProviders.value[0]) form.provider = enabledProviders.value[0].code
   } catch (reason) {
-    ElMessage.error(errorMessage(reason, '供应商加载失败'))
+    if (disposed || controller.signal.aborted) return
+    if (notify) ElMessage.error(errorMessage(reason, '余额刷新失败'))
+    if (!Object.keys(providerBalances.value).length) {
+      const unavailable: Partial<Record<ProviderCode, ProviderBalance>> = {}
+      for (const item of providers.value) {
+        unavailable[item.code] = {
+          code: item.code,
+          name: item.name,
+          enabled: item.enabled,
+          status: item.enabled ? 'unavailable' : 'disabled',
+          message: item.enabled ? '余额暂不可用' : '接口未启用',
+        }
+      }
+      providerBalances.value = unavailable
+    }
   } finally {
-    loadingProviders.value = false
+    if (balanceAbortController === controller) balanceAbortController = undefined
+    if (!disposed) loadingBalances.value = false
   }
+}
+
+async function refreshProviders(): Promise<void> {
+  await loadProviders()
+  await loadProviderBalances(true)
+}
+
+function handleVisibilityChange(): void {
+  if (!document.hidden && navigator.onLine) void loadProviderBalances()
 }
 
 async function loadServices(provider: ProviderCode): Promise<ServiceOption[] | null> {
@@ -233,7 +376,7 @@ async function loadCountries(): Promise<CountryOption[] | null> {
   }
 }
 
-async function loadQuote(): Promise<Quote[] | null> {
+async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<Quote[] | null> {
   if (!form.provider || !form.countryCode || !form.serviceCode) return null
   const provider = form.provider
   const country = form.countryCode
@@ -262,9 +405,11 @@ async function loadQuote(): Promise<Quote[] | null> {
     if (provider === 'smsbower' && result.length < smsBowerTiers.length) {
       ElMessage.warning('部分号码等级的价格暂未加载')
     }
-    const nextSelection = priceOptions.value.some((option) => option.key === savedSelection)
-      ? savedSelection
-      : priceOptions.value[0]?.key || ''
+    const nextSelection = options.requireSelection
+      ? ''
+      : priceOptions.value.some((option) => option.key === savedSelection)
+        ? savedSelection
+        : priceOptions.value[0]?.key || ''
     selectPrice(nextSelection)
     return result
   } catch (reason) {
@@ -290,7 +435,7 @@ async function restoreProviderSelection(provider: ProviderCode, selection?: Prov
 
     form.countryCode = selection.countryCode
     form.priceSelection = selection.priceSelection
-    await loadQuote()
+    await loadQuote({ requireSelection: !selection.priceSelection })
   } finally {
     if (generation === providerRestoreGeneration) {
       restoringProviderSelection.value = false
@@ -301,7 +446,6 @@ async function restoreProviderSelection(provider: ProviderCode, selection?: Prov
 watch(
   () => form.provider,
   (provider) => {
-    purchaseIdempotencyKey.value = ''
     providerRestoreGeneration += 1
     servicesGeneration += 1
     countriesGeneration += 1
@@ -318,6 +462,7 @@ watch(
     countries.value = []
     quotes.value = []
     restoringProviderSelection.value = false
+    persistFormSelections()
     if (provider) void restoreProviderSelection(provider, providerSelections[provider])
   },
 )
@@ -326,7 +471,6 @@ watch(
   () => form.serviceCode,
   (service) => {
     if (restoringProviderSelection.value) return
-    purchaseIdempotencyKey.value = ''
     countriesGeneration += 1
     quoteGeneration += 1
     loadingCountries.value = false
@@ -343,7 +487,6 @@ watch(
   () => form.countryCode,
   (country) => {
     if (restoringProviderSelection.value) return
-    purchaseIdempotencyKey.value = ''
     quoteGeneration += 1
     loadingQuote.value = false
     clearPriceSelection()
@@ -435,7 +578,6 @@ function persistedIdempotencyKey(storageKey: string, signature: string): string 
 }
 
 function clearPersistedPurchase(storageKey: string, signature: string): void {
-  purchaseIdempotencyKey.value = ''
   const intents = readPurchaseIntents(storageKey)
   delete intents[signature]
   writePurchaseIntents(storageKey, intents)
@@ -456,8 +598,7 @@ async function purchase(): Promise<void> {
       return
     }
     requestSignature = purchaseSignature()
-    const requestKey = purchaseIdempotencyKey.value || persistedIdempotencyKey(requestStorageKey, requestSignature)
-    purchaseIdempotencyKey.value = requestKey
+    const requestKey = persistedIdempotencyKey(requestStorageKey, requestSignature)
     await ordersApi.create(
       {
         provider: form.provider,
@@ -469,28 +610,52 @@ async function purchase(): Promise<void> {
       requestKey,
     )
     clearPersistedPurchase(requestStorageKey, requestSignature)
+    if (disposed) return
     ElMessage.success('号码购买成功，已开始持续接收验证码')
     formRef.value?.clearValidate()
     saveCurrentSelection()
-    await Promise.all([ordersRef.value?.revealLatest(), loadQuote()])
+    await Promise.all([ordersRef.value?.revealLatest(), loadQuote(), loadProviderBalances()])
   } catch (reason) {
     if (requestStorageKey && requestSignature && TERMINAL_PURCHASE_FAILURE_CODES.has(errorCode(reason))) {
       clearPersistedPurchase(requestStorageKey, requestSignature)
     }
-    ElMessage.error(errorMessage(reason, '购买失败，请调整条件后重试'))
+    if (!disposed) ElMessage.error(errorMessage(reason, '购买失败，请调整条件后重试'))
   } finally {
     purchasing.value = false
   }
 }
 
-onMounted(loadProviders)
+onMounted(async () => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  window.addEventListener('online', handleVisibilityChange)
+  await loadProviders()
+  if (disposed) return
+  await loadProviderBalances()
+  if (disposed) return
+  balanceRefreshTimer = window.setInterval(() => {
+    if (!document.hidden && navigator.onLine) void loadProviderBalances()
+  }, 30_000)
+})
+
+onBeforeUnmount(() => {
+  if (!restoringProviderSelection.value) saveCurrentSelection()
+  disposed = true
+  if (balanceRefreshTimer !== undefined) window.clearInterval(balanceRefreshTimer)
+  balanceAbortController?.abort()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('online', handleVisibilityChange)
+  providerRestoreGeneration += 1
+  servicesGeneration += 1
+  countriesGeneration += 1
+  quoteGeneration += 1
+})
 </script>
 
 <template>
   <div class="page-stack buy-page">
     <PageHeader title="号码管理" description="选择号码资源并直接购买，下方可管理订单与持续接收验证码。">
       <template #actions>
-        <el-button :icon="Refresh" :loading="loadingProviders" @click="loadProviders">刷新平台</el-button>
+        <el-button :icon="Refresh" :loading="loadingProviders || loadingBalances" @click="refreshProviders">刷新平台</el-button>
       </template>
     </PageHeader>
 
@@ -498,25 +663,30 @@ onMounted(loadProviders)
       <article class="content-card buy-form-card">
         <div class="step-heading">
           <span>01</span>
-          <div><h3>设置采购条件</h3><p>仅展示当前已启用的供应商及其可用资源。</p></div>
+          <div><h3>设置采购条件</h3><p>展示各供应商状态与实时余额，仅已启用接口可用于采购。</p></div>
         </div>
 
         <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="purchase-form">
           <el-form-item label="供应商" prop="provider">
             <div class="provider-selector" v-loading="loadingProviders">
               <button
-                v-for="provider in enabledProviders"
+                v-for="provider in providers"
                 :key="provider.code"
                 type="button"
                 class="provider-option"
-                :class="{ selected: form.provider === provider.code }"
-                @click="form.provider = provider.code"
+                :class="{ selected: form.provider === provider.code, disabled: !provider.enabled }"
+                :disabled="!provider.enabled"
+                :aria-disabled="!provider.enabled"
+                @click="provider.enabled && (form.provider = provider.code)"
               >
                 <span class="provider-logo" :class="`provider-${provider.code}`">{{ providerName(provider.code).slice(0, 1) }}</span>
-                <span><strong>{{ provider.name || providerName(provider.code) }}</strong><small>接口已启用</small></span>
+                <span>
+                  <strong>{{ provider.name || providerName(provider.code) }}</strong>
+                  <small :title="providerBalances[provider.code]?.message || providerBalanceText(provider)">{{ providerBalanceText(provider) }}</small>
+                </span>
                 <el-icon class="option-check"><Check /></el-icon>
               </button>
-              <el-empty v-if="!loadingProviders && !enabledProviders.length" description="暂无已启用供应商" :image-size="60" />
+              <el-empty v-if="!loadingProviders && !providers.length" description="暂无供应商配置" :image-size="60" />
             </div>
           </el-form-item>
 
@@ -557,7 +727,7 @@ onMounted(loadProviders)
               :model-value="form.priceSelection"
               :loading="loadingQuote"
               :disabled="!priceOptions.length || loadingQuote"
-              placeholder="选择国家后加载价格"
+              :placeholder="loadingQuote ? '正在刷新价格' : priceOptions.length ? '请选择最新价格' : '选择国家后加载价格'"
               style="width: 100%"
               @change="selectPrice"
             >
