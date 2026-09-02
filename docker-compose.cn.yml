@@ -1,0 +1,18 @@
+# 与 docker-compose.yml 叠加使用，仅替换下载源；业务行为保持一致。
+services:
+  app:
+    build:
+      args:
+        NODE_IMAGE: ${CN_NODE_IMAGE:-docker.m.daocloud.io/library/node:22-alpine}
+        GO_IMAGE: ${CN_GO_IMAGE:-docker.m.daocloud.io/library/golang:1.24-alpine}
+        RUNTIME_IMAGE: ${CN_RUNTIME_IMAGE:-docker.m.daocloud.io/library/alpine:3.21}
+        NPM_REGISTRY: ${CN_NPM_REGISTRY:-https://registry.npmmirror.com}
+        GOPROXY: ${CN_GOPROXY:-https://goproxy.cn,direct}
+        GOSUMDB: ${CN_GOSUMDB:-sum.golang.google.cn}
+        ALPINE_MIRROR: ${CN_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}
+        DEBIAN_MIRROR: ${CN_DEBIAN_MIRROR:-https://mirrors.aliyun.com/debian}
+        DEBIAN_SECURITY_MIRROR: ${CN_DEBIAN_SECURITY_MIRROR:-https://mirrors.aliyun.com/debian-security}
+
+  db:
+    image: ${CN_POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:17-alpine}
+

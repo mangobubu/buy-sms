@@ -1,0 +1,90 @@
+name: ${COMPOSE_PROJECT_NAME:-buy-sms}
+
+services:
+  app:
+    image: ${APP_IMAGE:-buy-sms:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-alpine}
+        GO_IMAGE: ${GO_IMAGE:-golang:1.24-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.21}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        GOSUMDB: ${GOSUMDB:-sum.golang.org}
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}
+        DEBIAN_SECURITY_MIRROR: ${DEBIAN_SECURITY_MIRROR:-}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      APP_ADDR: :8080
+      TZ: ${TZ:-Asia/Shanghai}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?请在 .env 中设置 PUBLIC_BASE_URL}
+      DATABASE_URL: postgres://${POSTGRES_USER:-buy_sms}:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-buy_sms}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:?请在 .env 中设置 DATA_ENCRYPTION_KEY}
+      ADMIN_ENTRY_PATH: ${ADMIN_ENTRY_PATH:?请在 .env 中设置随机 ADMIN_ENTRY_PATH}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+    ports:
+      - "${APP_BIND_ADDR:-127.0.0.1}:${APP_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:17-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buy_sms}
+      POSTGRES_USER: ${POSTGRES_USER:-buy_sms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks:
+      - internal
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  postgres-data:
+
+networks:
+  internal:
+    driver: bridge

@@ -1,0 +1,38 @@
+# 本地配置与密钥
+.env
+.env.*
+!.env.example
+
+# Go 构建与测试产物
+/bin/
+/coverage/
+*.coverprofile
+*.test
+*.out
+
+# 前端依赖与构建产物
+/frontend/node_modules/
+/frontend/dist/
+# 前端真实构建产物不提交；保留占位文件，确保全新检出时 go:embed 可编译。
+/web/dist/*
+!/web/dist/placeholder.txt
+/node_modules/
+
+# 临时文件与运行数据
+/.cache/
+/.tmp/
+/tmp/
+/data/
+*.log
+*.pid
+
+# 本地 Compose 覆盖文件（模板除外）
+docker-compose.override.yml
+
+# 编辑器与操作系统文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
