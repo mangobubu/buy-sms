@@ -51,6 +51,10 @@ func heroLegacyURL(baseURL string) string {
 
 func (c *HeroSMS) ID() string { return domain.ProviderHeroSMS }
 
+func (c *HeroSMS) Balance(ctx context.Context, apiKey string) (BalanceResult, error) {
+	return c.legacy.Balance(ctx, apiKey)
+}
+
 func (c *HeroSMS) Catalog(ctx context.Context, apiKey string, request CatalogRequest) ([]domain.CatalogItem, error) {
 	if strings.TrimSpace(request.QualityTier) != "" {
 		return nil, ErrInvalidRequest

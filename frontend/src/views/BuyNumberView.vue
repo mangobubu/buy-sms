@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import axios from 'axios'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Refresh, ShoppingCart } from '@element-plus/icons-vue'
 import PageHeader from '@/components/PageHeader.vue'
 import OrdersView from '@/views/OrdersView.vue'
@@ -20,6 +21,17 @@ import type {
   SmsBowerTier,
 } from '@/types/api'
 import { formatMoney, providerName } from '@/utils/format'
+import {
+  clearPurchaseIntent,
+  createPurchaseIntentStore,
+  createPurchaseSignature,
+  getOrCreatePurchaseIntentKey,
+  normalizePurchaseSignature,
+  PurchaseIntentConflictError,
+  PurchaseIntentPersistenceError,
+  type PurchaseIntentLockManager,
+  type PurchaseIntentStorage,
+} from '@/utils/purchase-intents'
 
 const formRef = ref<FormInstance>()
 const ordersRef = ref<InstanceType<typeof OrdersView>>()
@@ -38,10 +50,16 @@ const TERMINAL_PURCHASE_FAILURE_CODES = new Set([
   'invalid_selection',
   'no_numbers',
   'provider_disabled',
+  'provider_preflight_error',
   'provider_rate_limited',
   'price_exceeded',
-  'purchase_failed',
   'purchase_setup_failed',
+])
+const UNCERTAIN_PURCHASE_FAILURE_CODES = new Set([
+  'provider_error',
+  'purchase_failed',
+  'purchase_result_unknown',
+  'database_error',
 ])
 const providers = ref<ProviderConfig[]>([])
 const providerBalances = ref<Partial<Record<ProviderCode, ProviderBalance>>>({})
@@ -60,6 +78,7 @@ let quoteGeneration = 0
 let providerRestoreGeneration = 0
 let balanceRefreshTimer: number | undefined
 let balanceAbortController: AbortController | undefined
+let balanceRefreshPromise: Promise<void> | undefined
 let disposed = false
 const restoringProviderSelection = ref(false)
 
@@ -79,19 +98,36 @@ const rules: FormRules = {
   priceSelection: [{ required: true, message: '请选择价格', trigger: 'change' }],
 }
 
-const enabledProviders = computed(() => providers.value.filter((item) => item.enabled))
+function providerPurchasable(provider: ProviderConfig): boolean {
+  return provider.enabled && provider.purchasable && (providerBalances.value[provider.code]?.purchasable ?? true)
+}
+
+const purchasableProviders = computed(() => providers.value.filter(providerPurchasable))
 
 function providerBalanceText(provider: ProviderConfig): string {
   if (!provider.enabled) return '接口未启用 · 余额 —'
   const current = providerBalances.value[provider.code]
   if (!current && loadingBalances.value) return '接口已启用 · 余额查询中'
+  if (current?.stale && current.balance !== undefined) {
+    return `接口已启用 · 上次余额 ${formatMoney(current.balance, current.currency || 'USD')}`
+  }
   if (current?.status === 'ok' && current.balance !== undefined) {
     return `接口已启用 · 余额 ${formatMoney(current.balance, current.currency || 'USD')}`
   }
   if (current?.status === 'unconfigured') return '接口不可用 · 余额 —'
+  if (current?.purchasable === false) return '接口不可用 · 余额 —'
   if (current?.status === 'timeout') return '接口已启用 · 余额查询超时'
   if (current?.status === 'unavailable') return '接口已启用 · 余额暂不可用'
   return '接口已启用 · 余额查询中'
+}
+
+function selectPurchasableProvider(): void {
+  const selected = providers.value.find((item) => item.code === form.provider)
+  if (selected && providerPurchasable(selected)) return
+  if (form.provider) form.provider = ''
+  const preferredProvider = purchasableProviders.value.find((item) => item.code === persistedProviderPreference)
+  const nextProvider = preferredProvider || purchasableProviders.value[0]
+  if (nextProvider) form.provider = nextProvider.code
 }
 interface DisplayPriceOption {
   key: string
@@ -116,6 +152,7 @@ interface PersistedProviderSelection {
 
 const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool']
 const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
+let persistedProviderPreference: ProviderCode | '' = ''
 
 function priceOptionKey(tier: SmsBowerTier | undefined, price: string): string {
   return `${tier || 'standard'}:${price}`
@@ -247,13 +284,10 @@ async function loadProviders(): Promise<void> {
     const result = await providersApi.list()
     if (disposed) return
     providers.value = result
-    if (form.provider && !enabledProviders.value.some((item) => item.code === form.provider)) form.provider = ''
-    if (!form.provider) {
-      const persistedProvider = readPersistedFormSelections()
-      const preferredProvider = enabledProviders.value.find((item) => item.code === persistedProvider)
-      const nextProvider = preferredProvider || enabledProviders.value[0]
-      if (nextProvider) form.provider = nextProvider.code
-    }
+    const selected = providers.value.find((item) => item.code === form.provider)
+    if (selected && (!selected.enabled || providerBalances.value[selected.code]?.purchasable === false)) form.provider = ''
+    if (!form.provider) persistedProviderPreference = readPersistedFormSelections()
+    selectPurchasableProvider()
   } catch (reason) {
     if (!disposed) ElMessage.error(errorMessage(reason, '供应商加载失败'))
   } finally {
@@ -261,37 +295,75 @@ async function loadProviders(): Promise<void> {
   }
 }
 
-async function loadProviderBalances(notify = false): Promise<void> {
-  if (disposed || loadingBalances.value || document.hidden || !navigator.onLine) return
+function loadProviderBalances(notify = false): Promise<void> {
+  if (disposed || document.hidden || !navigator.onLine) return Promise.resolve()
+  if (balanceRefreshPromise) return balanceRefreshPromise
+  const request = performProviderBalanceRefresh(notify)
+  let tracked: Promise<void>
+  tracked = request.finally(() => {
+    if (balanceRefreshPromise === tracked) balanceRefreshPromise = undefined
+  })
+  balanceRefreshPromise = tracked
+  return tracked
+}
+
+async function forceLoadProviderBalances(notify = false): Promise<void> {
+  if (disposed || document.hidden || !navigator.onLine) return
+  const currentRequest = balanceRefreshPromise
+  if (currentRequest) {
+    balanceAbortController?.abort()
+    await currentRequest
+  }
+  await loadProviderBalances(notify)
+}
+
+async function performProviderBalanceRefresh(notify: boolean): Promise<void> {
   loadingBalances.value = true
   const controller = new AbortController()
   balanceAbortController = controller
   try {
     const result = await providersApi.balances(controller.signal)
     if (disposed) return
-    providerBalances.value = Object.fromEntries(result.map((item) => [item.code, item]))
+    providerBalances.value = Object.fromEntries(result.map((item) => {
+      const previous = providerBalances.value[item.code]
+      if (item.purchasable && item.status !== 'ok' && previous?.balance !== undefined) {
+        return [item.code, {
+          ...item,
+          balance: previous.balance,
+          currency: previous.currency,
+          lastCheckedAt: previous.lastCheckedAt,
+          stale: true,
+        } satisfies ProviderBalance]
+      }
+      return [item.code, item]
+    }))
     const enabled = new Map(result.map((item) => [item.code, item.enabled]))
     providers.value = providers.value.map((item) =>
       enabled.has(item.code) ? { ...item, enabled: enabled.get(item.code)! } : item,
     )
-    if (form.provider && !providers.value.some((item) => item.code === form.provider && item.enabled)) form.provider = ''
-    if (!form.provider && enabledProviders.value[0]) form.provider = enabledProviders.value[0].code
+    selectPurchasableProvider()
   } catch (reason) {
     if (disposed || controller.signal.aborted) return
     if (notify) ElMessage.error(errorMessage(reason, '余额刷新失败'))
-    if (!Object.keys(providerBalances.value).length) {
-      const unavailable: Partial<Record<ProviderCode, ProviderBalance>> = {}
-      for (const item of providers.value) {
-        unavailable[item.code] = {
-          code: item.code,
-          name: item.name,
-          enabled: item.enabled,
-          status: item.enabled ? 'unavailable' : 'disabled',
-          message: item.enabled ? '余额暂不可用' : '接口未启用',
-        }
+    const unavailable: Partial<Record<ProviderCode, ProviderBalance>> = {}
+    for (const item of providers.value) {
+      const previous = providerBalances.value[item.code]
+      const purchasable = item.purchasable && (previous?.purchasable ?? true)
+      unavailable[item.code] = {
+        code: item.code,
+        name: item.name,
+        enabled: item.enabled,
+        purchasable,
+        status: item.enabled ? 'unavailable' : 'disabled',
+        balance: purchasable ? previous?.balance : undefined,
+        currency: purchasable ? previous?.currency : undefined,
+        lastCheckedAt: purchasable ? previous?.lastCheckedAt : undefined,
+        stale: purchasable && previous?.balance !== undefined,
+        message: !item.enabled ? '接口未启用' : purchasable ? '余额刷新失败，当前显示上次查询结果' : '接口不可用',
       }
-      providerBalances.value = unavailable
     }
+    providerBalances.value = unavailable
+    selectPurchasableProvider()
   } finally {
     if (balanceAbortController === controller) balanceAbortController = undefined
     if (!disposed) loadingBalances.value = false
@@ -300,7 +372,7 @@ async function loadProviderBalances(notify = false): Promise<void> {
 
 async function refreshProviders(): Promise<void> {
   await loadProviders()
-  await loadProviderBalances(true)
+  await forceLoadProviderBalances(true)
 }
 
 function handleVisibilityChange(): void {
@@ -503,14 +575,35 @@ function newIdempotencyKey(): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')
 }
 
-function purchaseSignature(): string {
-  return JSON.stringify({
-    provider: form.provider,
-    serviceCode: form.serviceCode,
-    tier: form.tier || undefined,
-    countryCode: form.countryCode,
-    maxPrice: form.maxPrice.trim(),
-  })
+function browserStorage(name: 'localStorage' | 'sessionStorage'): PurchaseIntentStorage {
+  return {
+    getItem: (key) => window[name].getItem(key),
+    setItem: (key, value) => window[name].setItem(key, value),
+    removeItem: (key) => window[name].removeItem(key),
+  }
+}
+
+const purchaseIntentStore = createPurchaseIntentStore({
+  primaryStorage: browserStorage('localStorage'),
+  migrationStorage: browserStorage('sessionStorage'),
+  legacyStorageKey: PURCHASE_INTENT_KEY,
+  createKey: newIdempotencyKey,
+  normalizeSignature: normalizePurchaseSignature,
+})
+const purchaseIntentLockManager: PurchaseIntentLockManager | undefined =
+  typeof navigator !== 'undefined' && navigator.locks
+    ? {
+        request: <T,>(name: string, callback: () => T | Promise<T>) =>
+          navigator.locks.request(name, () => callback()),
+      }
+    : undefined
+
+interface PurchaseConditionSnapshot {
+  provider: ProviderCode
+  serviceCode: string
+  tier: SmsBowerTier | ''
+  countryCode: string
+  maxPrice: string
 }
 
 function purchaseIntentStorageKey(): string {
@@ -518,69 +611,62 @@ function purchaseIntentStorageKey(): string {
   return userID ? `${PURCHASE_INTENT_KEY}:${userID}` : ''
 }
 
-interface PurchaseIntentEntry {
-  key: string
-  updatedAt: number
+function uncertainTransportFailureMessage(reason: unknown, applicationCode: string): string {
+  if (!axios.isAxiosError(reason)) return ''
+  const code = reason.code?.toUpperCase()
+  if (!reason.response) {
+    if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+      return '页面等待购买结果超时，购买结果尚未确认。系统尚未确认供应商是否已生成号码或当前订单是否已保存。为避免重复扣费，已暂停当前平台与当前购买条件的再次提交。'
+    }
+    if (code === 'ERR_NETWORK') {
+      return '购买连接中断，购买结果尚未确认。系统尚未确认供应商是否已生成号码或当前订单是否已保存。为避免重复扣费，已暂停当前平台与当前购买条件的再次提交。'
+    }
+    return ''
+  }
+  if (!applicationCode && [500, 502, 503, 504].includes(reason.response.status)) {
+    return '网关或服务响应异常，购买结果尚未确认。系统尚未确认供应商是否已生成号码或当前订单是否已保存。为避免重复扣费，已暂停当前平台与当前购买条件的再次提交。'
+  }
+  return ''
 }
 
-function readPurchaseIntents(storageKey: string): Record<string, PurchaseIntentEntry> {
-  if (!storageKey) return {}
+async function confirmPurchaseRetryUnlock(
+  storageKey: string,
+  signature: string,
+  conditions: PurchaseConditionSnapshot,
+  failureMessage: string,
+): Promise<void> {
+  const conditionSummary =
+    '平台：' +
+    providerName(conditions.provider) +
+    '；服务：' +
+    conditions.serviceCode +
+    '；国家或地区：' +
+    conditions.countryCode +
+    '；号码等级：' +
+    (conditions.tier || '默认') +
+    '；最高价格：' +
+    formatMoney(conditions.maxPrice, 'USD')
   try {
-    let raw = sessionStorage.getItem(storageKey)
-    if (raw === null) {
-      // 当前页面处于已认证路由，旧版全局值归入当前账号后立即删除，
-      // 避免后续账号重复继承或终态清理后再次复活旧购买编号。
-      raw = sessionStorage.getItem(PURCHASE_INTENT_KEY)
-      if (raw !== null) {
-        sessionStorage.setItem(storageKey, raw)
-        sessionStorage.removeItem(PURCHASE_INTENT_KEY)
-      }
-    }
-    const parsed = JSON.parse(raw ?? '{}') as unknown
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    const legacy = parsed as { signature?: unknown; key?: unknown }
-    if (typeof legacy.signature === 'string' && typeof legacy.key === 'string') {
-      return { [legacy.signature]: { key: legacy.key, updatedAt: Date.now() } }
-    }
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-          (entry): entry is [string, PurchaseIntentEntry] =>
-            typeof entry[1] === 'object' &&
-            entry[1] !== null &&
-            typeof (entry[1] as PurchaseIntentEntry).key === 'string' &&
-            typeof (entry[1] as PurchaseIntentEntry).updatedAt === 'number',
-        ),
+    await ElMessageBox.confirm(
+      failureMessage +
+        ' 本次请求条件为：' +
+        conditionSummary +
+        '。重新购买前，请先刷新当前订单，并登录该供应商后台，按以上条件确认没有生成号码，也没有产生扣费。确认后只会解除上述平台与购买条件的重试保护，其他平台和购买条件不受影响。',
+      '购买结果待核对',
+      {
+        confirmButtonText: '已核对，允许重新购买',
+        cancelButtonText: '保留重试保护',
+        type: 'warning',
+      },
     )
   } catch {
-    sessionStorage.removeItem(storageKey)
-    return {}
+    return
   }
-}
-
-function writePurchaseIntents(storageKey: string, intents: Record<string, PurchaseIntentEntry>): void {
-  if (!storageKey) return
-  if (Object.keys(intents).length) sessionStorage.setItem(storageKey, JSON.stringify(intents))
-  else sessionStorage.removeItem(storageKey)
-}
-
-function persistedIdempotencyKey(storageKey: string, signature: string): string {
-  const intents = readPurchaseIntents(storageKey)
-  const saved = intents[signature]
-  if (saved) {
-    saved.updatedAt = Date.now()
-    writePurchaseIntents(storageKey, intents)
-    return saved.key
+  if (await clearPurchaseIntent(purchaseIntentStore, storageKey, signature, purchaseIntentLockManager)) {
+    if (!disposed) ElMessage.success('已解除当前平台与当前购买条件的重试保护，请手动重新购买')
+  } else if (!disposed) {
+    ElMessage.error('浏览器无法保存解除状态，请允许本站使用持久化存储后重试')
   }
-  const key = newIdempotencyKey()
-  intents[signature] = { key, updatedAt: Date.now() }
-  writePurchaseIntents(storageKey, intents)
-  return key
-}
-
-function clearPersistedPurchase(storageKey: string, signature: string): void {
-  const intents = readPurchaseIntents(storageKey)
-  delete intents[signature]
-  writePurchaseIntents(storageKey, intents)
 }
 
 async function purchase(): Promise<void> {
@@ -588,6 +674,7 @@ async function purchase(): Promise<void> {
   purchasing.value = true
   let requestSignature = ''
   let requestStorageKey = ''
+  let requestConditions: PurchaseConditionSnapshot | null = null
   try {
     if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
     if (!form.provider) return
@@ -597,29 +684,79 @@ async function purchase(): Promise<void> {
       ElMessage.error('登录状态尚未就绪，请刷新页面后重试')
       return
     }
-    requestSignature = purchaseSignature()
-    const requestKey = persistedIdempotencyKey(requestStorageKey, requestSignature)
+    requestConditions = {
+      provider: form.provider,
+      serviceCode: form.serviceCode,
+      tier: form.tier,
+      countryCode: form.countryCode,
+      maxPrice: form.maxPrice.trim(),
+    }
+    requestSignature = createPurchaseSignature(requestConditions)
+    const requestKey = await getOrCreatePurchaseIntentKey(
+      purchaseIntentStore,
+      requestStorageKey,
+      requestSignature,
+      purchaseIntentLockManager,
+    )
     await ordersApi.create(
       {
-        provider: form.provider,
-        countryCode: form.countryCode,
-        serviceCode: form.serviceCode,
-        ...(form.tier ? { tier: form.tier } : {}),
-        maxPrice: form.maxPrice,
+        provider: requestConditions.provider,
+        countryCode: requestConditions.countryCode,
+        serviceCode: requestConditions.serviceCode,
+        ...(requestConditions.tier ? { tier: requestConditions.tier } : {}),
+        maxPrice: requestConditions.maxPrice,
       },
       requestKey,
     )
-    clearPersistedPurchase(requestStorageKey, requestSignature)
+    await clearPurchaseIntent(
+      purchaseIntentStore,
+      requestStorageKey,
+      requestSignature,
+      purchaseIntentLockManager,
+    )
     if (disposed) return
     ElMessage.success('号码购买成功，已开始持续接收验证码')
     formRef.value?.clearValidate()
     saveCurrentSelection()
-    await Promise.all([ordersRef.value?.revealLatest(), loadQuote(), loadProviderBalances()])
+    await Promise.all([ordersRef.value?.revealLatest(), loadQuote(), forceLoadProviderBalances()])
   } catch (reason) {
-    if (requestStorageKey && requestSignature && TERMINAL_PURCHASE_FAILURE_CODES.has(errorCode(reason))) {
-      clearPersistedPurchase(requestStorageKey, requestSignature)
+    if (reason instanceof PurchaseIntentPersistenceError) {
+      if (!disposed) ElMessage.error(reason.message)
+      return
     }
-    if (!disposed) ElMessage.error(errorMessage(reason, '购买失败，请调整条件后重试'))
+    if (reason instanceof PurchaseIntentConflictError) {
+      if (!disposed && requestStorageKey && requestSignature && requestConditions) {
+        await confirmPurchaseRetryUnlock(
+          requestStorageKey,
+          requestSignature,
+          requestConditions,
+          reason.message,
+        )
+      }
+      return
+    }
+    const code = errorCode(reason)
+    if (requestStorageKey && requestSignature && TERMINAL_PURCHASE_FAILURE_CODES.has(code)) {
+      await clearPurchaseIntent(
+        purchaseIntentStore,
+        requestStorageKey,
+        requestSignature,
+        purchaseIntentLockManager,
+      )
+    }
+    if (disposed) return
+    const transportFailureMessage = uncertainTransportFailureMessage(reason, code)
+    const failureMessage = transportFailureMessage || errorMessage(reason, '购买失败，请调整条件后重试')
+    if (
+      requestStorageKey &&
+      requestSignature &&
+      requestConditions &&
+      (UNCERTAIN_PURCHASE_FAILURE_CODES.has(code) || Boolean(transportFailureMessage))
+    ) {
+      await confirmPurchaseRetryUnlock(requestStorageKey, requestSignature, requestConditions, failureMessage)
+    } else {
+      ElMessage.error(failureMessage)
+    }
   } finally {
     purchasing.value = false
   }
@@ -634,7 +771,7 @@ onMounted(async () => {
   if (disposed) return
   balanceRefreshTimer = window.setInterval(() => {
     if (!document.hidden && navigator.onLine) void loadProviderBalances()
-  }, 30_000)
+  }, 15_000)
 })
 
 onBeforeUnmount(() => {
@@ -674,10 +811,10 @@ onBeforeUnmount(() => {
                 :key="provider.code"
                 type="button"
                 class="provider-option"
-                :class="{ selected: form.provider === provider.code, disabled: !provider.enabled }"
-                :disabled="!provider.enabled"
-                :aria-disabled="!provider.enabled"
-                @click="provider.enabled && (form.provider = provider.code)"
+                :class="{ selected: form.provider === provider.code, disabled: !providerPurchasable(provider) }"
+                :disabled="!providerPurchasable(provider)"
+                :aria-disabled="!providerPurchasable(provider)"
+                @click="providerPurchasable(provider) && (form.provider = provider.code)"
               >
                 <span class="provider-logo" :class="`provider-${provider.code}`">{{ providerName(provider.code).slice(0, 1) }}</span>
                 <span>

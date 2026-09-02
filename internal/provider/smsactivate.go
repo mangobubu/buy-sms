@@ -24,6 +24,54 @@ func newSMSActivateClient(providerID, baseURL string, config clientConfig) *smsA
 
 func (c *smsActivateClient) ID() string { return c.providerID }
 
+func (c *smsActivateClient) Balance(ctx context.Context, apiKey string) (BalanceResult, error) {
+	if err := require(apiKey); err != nil {
+		return BalanceResult{}, err
+	}
+	query := url.Values{"action": {"getBalance"}}
+	payload, err := c.http.get(ctx, "balance", apiKey, "", query, false)
+	if err != nil {
+		return BalanceResult{}, err
+	}
+	if businessErr := c.businessError("balance", apiKey, payload); businessErr != nil {
+		return BalanceResult{}, businessErr
+	}
+
+	text := strings.TrimSpace(string(payload))
+	parts := strings.SplitN(text, ":", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "ACCESS_BALANCE") {
+		return BalanceResult{}, c.http.failure("balance", "INVALID_RESPONSE", 0, false, nil)
+	}
+	amount, ok := validBalanceAmount(parts[1])
+	if !ok {
+		return BalanceResult{}, c.http.failure("balance", "INVALID_RESPONSE", 0, false, nil)
+	}
+	return BalanceResult{Amount: amount, Currency: "USD"}, nil
+}
+
+// validBalanceAmount 只接受不带符号、指数或分组符号的非负十进制文本。
+// 返回原文本，确保供应商给出的精度及尾随零可原样展示。
+func validBalanceAmount(value string) (string, bool) {
+	if value == "" || len(value) > 64 {
+		return "", false
+	}
+	dot := -1
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		switch {
+		case character >= '0' && character <= '9':
+		case character == '.' && dot < 0:
+			dot = index
+		default:
+			return "", false
+		}
+	}
+	if dot == 0 || dot == len(value)-1 {
+		return "", false
+	}
+	return value, true
+}
+
 func (c *smsActivateClient) Catalog(ctx context.Context, apiKey string, request CatalogRequest) ([]domain.CatalogItem, error) {
 	if err := require(apiKey); err != nil {
 		return nil, err

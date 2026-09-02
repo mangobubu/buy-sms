@@ -13,6 +13,7 @@ import (
 
 	"buysms/internal/config"
 	"buysms/internal/domain"
+	"buysms/internal/provider"
 	"buysms/internal/secure"
 	"buysms/internal/store"
 )
@@ -20,13 +21,14 @@ import (
 type purchaseRepository struct {
 	store.Repository
 
-	mu        sync.Mutex
-	provider  domain.Provider
-	records   map[string]store.PurchaseRecord
-	failCodes map[string]string
-	orders    map[string]domain.Order
-	reserves  int
-	completes int
+	mu          sync.Mutex
+	provider    domain.Provider
+	records     map[string]store.PurchaseRecord
+	failCodes   map[string]string
+	orders      map[string]domain.Order
+	reserves    int
+	completes   int
+	completeErr error
 }
 
 func newPurchaseRepository(provider domain.Provider) *purchaseRepository {
@@ -62,6 +64,9 @@ func (r *purchaseRepository) GetProvider(_ context.Context, id string) (domain.P
 func (r *purchaseRepository) CompletePurchase(_ context.Context, recordID string, order domain.Order) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.completeErr != nil {
+		return r.completeErr
+	}
 	for key, record := range r.records {
 		if record.ID != recordID || record.Status != "provisioning" {
 			continue
@@ -146,14 +151,15 @@ func requirePurchaseError(t *testing.T, err error, code, message string) *Purcha
 
 func TestPurchaseErrorKeepsUncertainFailuresDistinct(t *testing.T) {
 	definiteFailureCodes := map[string]bool{
-		"configuration":         true,
-		"insufficient_balance":  true,
-		"invalid_selection":     true,
-		"no_numbers":            true,
-		"provider_disabled":     true,
-		"provider_rate_limited": true,
-		"price_exceeded":        true,
-		"purchase_setup_failed": true,
+		"configuration":            true,
+		"insufficient_balance":     true,
+		"invalid_selection":        true,
+		"no_numbers":               true,
+		"provider_disabled":        true,
+		"provider_rate_limited":    true,
+		"provider_preflight_error": true,
+		"price_exceeded":           true,
+		"purchase_setup_failed":    true,
 	}
 	tests := []struct {
 		name string
@@ -176,6 +182,62 @@ func TestPurchaseErrorKeepsUncertainFailuresDistinct(t *testing.T) {
 			}
 			if !errors.Is(purchaseErr, cause) {
 				t.Fatalf("错误 %q 未保留原始原因", tt.code)
+			}
+		})
+	}
+}
+
+func TestProviderPurchaseUnknownReason(t *testing.T) {
+	tests := []struct {
+		name, want string
+		err        error
+	}{
+		{"请求超时", purchaseUnknownProviderTimeout, &provider.ProviderError{Code: "TIMEOUT"}},
+		{"连接中断", purchaseUnknownProviderConnection, &provider.ProviderError{Code: "TRANSPORT_ERROR"}},
+		{"请求取消", purchaseUnknownProviderConnection, &provider.ProviderError{Code: "CANCELED"}},
+		{"HTTP 5xx", purchaseUnknownProviderHTTP, &provider.ProviderError{Code: "NO_BALANCE", HTTPStatus: http.StatusServiceUnavailable}},
+		{"HTTP 429", purchaseUnknownProviderHTTP, &provider.ProviderError{Code: "RATE_LIMIT", HTTPStatus: http.StatusTooManyRequests}},
+		{"响应读取失败", purchaseUnknownProviderRead, &provider.ProviderError{Code: "READ_ERROR"}},
+		{"响应格式异常", purchaseUnknownProviderResponse, &provider.ProviderError{Code: "INVALID_RESPONSE"}},
+		{"响应内容过大", purchaseUnknownProviderResponse, &provider.ProviderError{Code: "RESPONSE_TOO_LARGE"}},
+		{"未知供应商错误", "provider_error", &provider.ProviderError{Code: "UNKNOWN"}},
+		{"裸超时错误", purchaseUnknownProviderTimeout, context.DeadlineExceeded},
+		{"裸取消错误", purchaseUnknownProviderConnection, context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerPurchaseUnknownReason(tt.err); got != tt.want {
+				t.Fatalf("未知原因=%q，期望=%q", got, tt.want)
+			}
+			initial := providerPurchaseError(tt.want, tt.err)
+			if initial.Code != "provider_error" || !errors.Is(initial, ErrProvider) || !errors.Is(initial, tt.err) {
+				t.Fatalf("首次供应商错误契约异常: %+v", initial)
+			}
+			replay := purchaseResultUnknownError(tt.want, nil)
+			if replay.Code != "purchase_result_unknown" || !errors.Is(replay, ErrConflict) {
+				t.Fatalf("重放错误契约异常: %+v", replay)
+			}
+		})
+	}
+}
+
+func TestClassifyProviderPurchasePreflightErrorsAsFailed(t *testing.T) {
+	tests := []struct {
+		name, operation, providerCode, wantCode string
+		httpStatus                              int
+	}{
+		{"目录请求超时", "catalog.services", "TIMEOUT", "provider_preflight_error", 0},
+		{"等级响应异常", "catalog.tier", "INVALID_RESPONSE", "provider_preflight_error", 0},
+		{"目录 HTTP 5xx", "catalog.services", "UPSTREAM_ERROR", "provider_preflight_error", http.StatusServiceUnavailable},
+		{"等级暂无号码", "purchase.tier", "NO_NUMBERS", "no_numbers", 0},
+		{"目录服务无效", "catalog.services", "BAD_SERVICE", "invalid_selection", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &provider.ProviderError{Operation: tt.operation, Code: tt.providerCode, HTTPStatus: tt.httpStatus}
+			status, code := classifyProviderPurchaseError(err)
+			if status != "failed" || code != tt.wantCode {
+				t.Fatalf("前置错误分类=(%q,%q)，期望=(failed,%q)", status, code, tt.wantCode)
 			}
 		})
 	}
@@ -294,7 +356,7 @@ func TestConcurrentPurchaseWithSameIdempotencyKeyCallsUpstreamOnce(t *testing.T)
 		close(releaseUpstream)
 		t.Fatalf("并发同幂等键第二请求错误=%v，期望冲突", secondErr)
 	}
-	requirePurchaseError(t, secondErr, "purchase_in_progress", "购买请求正在处理中，可在“最近购买尝试”中查看状态")
+	requirePurchaseError(t, secondErr, "purchase_in_progress", "购买请求仍在处理中，系统尚未收到最终结果；请等待最多2分钟，再使用当前请求重试确认；为避免重复扣费，仅暂停该请求的重复提交")
 	close(releaseUpstream)
 	if firstErr := <-firstResult; firstErr != nil {
 		t.Fatalf("首个购买请求失败: %v", firstErr)
@@ -338,6 +400,101 @@ func TestPurchaseIdempotencyIncludesQualityTier(t *testing.T) {
 	requirePurchaseError(t, err, "idempotency_mismatch", "该购买编号已用于其他条件，页面将生成新的购买请求")
 }
 
+func TestPurchaseProvisioningBecomesUnknownAfterTwoMinutes(t *testing.T) {
+	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		updatedAt   time.Time
+		wantCode    string
+		wantStatus  string
+		wantStored  string
+		wantMessage string
+	}{
+		{
+			name: "未满两分钟仍在处理中", updatedAt: now.Add(-2*time.Minute + time.Nanosecond),
+			wantCode: "purchase_in_progress", wantStatus: "provisioning",
+			wantMessage: "购买请求仍在处理中，系统尚未收到最终结果；请等待最多2分钟，再使用当前请求重试确认；为避免重复扣费，仅暂停该请求的重复提交",
+		},
+		{
+			name: "恰好两分钟转为结果未知", updatedAt: now.Add(-2 * time.Minute),
+			wantCode: "purchase_result_unknown", wantStatus: "unknown", wantStored: purchaseUnknownStaleProvisioning,
+			wantMessage: "购买结果尚未确认：上一次请求处理已中断或状态更新失败，系统无法确认供应商是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const (
+				userID = "operator-provisioning-boundary"
+				key    = "idem-provisioning-boundary-12345"
+			)
+			repo := newPurchaseRepository(domain.Provider{ID: domain.ProviderHeroSMS, Enabled: true})
+			repo.records[userID+"\x00"+key] = store.PurchaseRecord{
+				ID: "stored-provisioning", UserID: userID, IdempotencyKey: key,
+				ProviderID: domain.ProviderHeroSMS, CountryCode: "2", ServiceCode: "tg",
+				MaxPrice: 1, Status: "provisioning", CreatedAt: now.Add(-time.Hour), UpdatedAt: tt.updatedAt,
+			}
+			service := purchaseService(t, repo)
+			service.now = func() time.Time { return now }
+			_, callErr := service.Purchase(
+				context.Background(), purchaseInput("1", key),
+				domain.User{ID: userID, Role: "operator"}, "127.0.0.1",
+			)
+			requirePurchaseError(t, callErr, tt.wantCode, tt.wantMessage)
+			record, code, _, _, _ := repo.snapshot(userID, key)
+			if record.Status != tt.wantStatus || code != tt.wantStored {
+				t.Fatalf("处理中边界状态异常: record=%+v code=%q", record, code)
+			}
+		})
+	}
+}
+
+func TestPurchaseUnknownIntentDoesNotBlockAnotherProvider(t *testing.T) {
+	var providerBCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/activations" {
+			http.NotFound(writer, request)
+			return
+		}
+		providerBCalls.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"provider-b-upstream","phone":"77009998877","price":0.2}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	vault, _ := secure.NewVault([]byte("purchase-provider-isolation-key"))
+	apiKey, _ := vault.Encrypt("provider-b-secret")
+	repo := newPurchaseRepository(domain.Provider{
+		ID: domain.ProviderHeroSMS, BaseURL: server.URL + "/api/v1", APIKeyCipher: apiKey, Enabled: true,
+	})
+	user := domain.User{ID: "operator-provider-isolation", Role: "operator"}
+	const (
+		providerAKey = "idem-provider-a-unknown-12345"
+		providerBKey = "idem-provider-b-new-12345678"
+	)
+	repo.records[user.ID+"\x00"+providerAKey] = store.PurchaseRecord{
+		ID: "provider-a-unknown", UserID: user.ID, IdempotencyKey: providerAKey,
+		ProviderID: domain.ProviderSMSBower, CountryCode: "2", ServiceCode: "tg",
+		MaxPrice: 1, Status: "unknown", ErrorCode: "provider_error",
+	}
+	service := New(repo, nil, vault, config.Config{})
+
+	providerBInput := purchaseInput("1", providerBKey)
+	order, err := service.Purchase(context.Background(), providerBInput, user, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("平台 A 的未知购买不应阻止平台 B 使用新编号购买: %v", err)
+	}
+	if order.Provider != domain.ProviderHeroSMS || order.PhoneNumber != "77009998877" || providerBCalls.Load() != 1 {
+		t.Fatalf("平台 B 购买结果异常: order=%+v calls=%d", order, providerBCalls.Load())
+	}
+
+	providerBInput.IdempotencyKey = providerAKey
+	_, err = service.Purchase(context.Background(), providerBInput, user, "127.0.0.1")
+	requirePurchaseError(t, err, "idempotency_mismatch", "该购买编号已用于其他条件，页面将生成新的购买请求")
+	if providerBCalls.Load() != 1 {
+		t.Fatalf("平台 B 误用平台 A 编号时不应再次调用上游，实际=%d", providerBCalls.Load())
+	}
+}
+
 func TestPurchaseTimeoutMarksUnknownAndRetryDoesNotCallUpstream(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	releaseHandler := make(chan struct{})
@@ -365,16 +522,16 @@ func TestPurchaseTimeoutMarksUnknownAndRetryDoesNotCallUpstream(t *testing.T) {
 	if !errors.Is(firstErr, ErrProvider) {
 		t.Fatalf("超时购买错误=%v，期望供应商错误", firstErr)
 	}
-	requirePurchaseError(t, firstErr, "provider_error", "供应商响应异常，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, firstErr, "provider_error", "购买结果尚未确认：供应商请求超时，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	record, code, orders, _, completes := repo.snapshot(user.ID, key)
-	if record.Status != "unknown" || code != "provider_error" || orders != 0 || completes != 0 {
+	if record.Status != "unknown" || code != purchaseUnknownProviderTimeout || orders != 0 || completes != 0 {
 		t.Fatalf("超时意图状态异常: record=%+v code=%q orders=%d completes=%d", record, code, orders, completes)
 	}
 	_, retryErr := service.Purchase(context.Background(), purchaseInput("1", key), user, "127.0.0.1")
 	if !errors.Is(retryErr, ErrConflict) {
 		t.Fatalf("unknown 意图同键重试错误=%v，期望冲突", retryErr)
 	}
-	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认：供应商请求超时，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	if calls := upstreamCalls.Load(); calls != 1 {
 		t.Fatalf("unknown 意图重试不应再次调用上游，实际=%d", calls)
 	}
@@ -446,13 +603,13 @@ func TestPurchaseKeepsHTTPServerErrorsUnknownEvenWithBusinessCode(t *testing.T) 
 	const key = "idem-http-uncertain-123456"
 
 	_, callErr := service.Purchase(context.Background(), purchaseInput("1", key), user, "127.0.0.1")
-	requirePurchaseError(t, callErr, "provider_error", "供应商响应异常，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, callErr, "provider_error", "购买结果尚未确认：供应商返回服务异常或限流响应，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	record, code, orders, _, completes := repo.snapshot(user.ID, key)
-	if record.Status != "unknown" || record.ErrorCode != "provider_error" || code != "provider_error" || orders != 0 || completes != 0 {
+	if record.Status != "unknown" || record.ErrorCode != purchaseUnknownProviderHTTP || code != purchaseUnknownProviderHTTP || orders != 0 || completes != 0 {
 		t.Fatalf("HTTP 5xx 必须保持结果待确认: record=%+v code=%q orders=%d completes=%d", record, code, orders, completes)
 	}
 	_, retryErr := service.Purchase(context.Background(), purchaseInput("1", key), user, "127.0.0.1")
-	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认：供应商返回服务异常或限流响应，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	if upstreamCalls.Load() != 1 {
 		t.Fatalf("HTTP 5xx 后同键重放不应再次调用供应商，实际=%d", upstreamCalls.Load())
 	}
@@ -465,6 +622,7 @@ func TestPurchaseReplaysStoredFailureReason(t *testing.T) {
 	}{
 		{"超价", "price_exceeded", "price_exceeded", "供应商实际价格超过所选价格，购买已取消", ErrConflict},
 		{"供应商停用", "provider_disabled", "provider_disabled", "所选供应商已停用，请选择其他供应商", ErrConflict},
+		{"供应商前置查询错误", "provider_preflight_error", "provider_preflight_error", "购买前获取供应商资源失败，号码购买尚未提交；可以重新提交当前平台与购买条件", ErrProvider},
 		{"配置错误", "configuration", "configuration", "供应商配置不完整，请联系管理员", ErrProvider},
 		{"未知失败码", "legacy_failure", "purchase_failed", "购买请求已失败，请刷新页面后重试", ErrConflict},
 		{"空失败码", "", "purchase_failed", "购买请求已失败，请刷新页面后重试", ErrConflict},
@@ -489,6 +647,45 @@ func TestPurchaseReplaysStoredFailureReason(t *testing.T) {
 				t.Fatalf("错误=%v，期望 errors.Is(%v)", callErr, tt.wantKind)
 			}
 			requirePurchaseError(t, callErr, tt.wantCode, tt.wantMessage)
+		})
+	}
+}
+
+func TestPurchaseReplaysStoredUnknownReason(t *testing.T) {
+	tests := []struct {
+		name, storedCode, wantMessage string
+	}{
+		{"历史供应商响应异常", "provider_error", "购买结果尚未确认：供应商请求超时、连接中断或响应异常，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"供应商请求超时", purchaseUnknownProviderTimeout, "购买结果尚未确认：供应商请求超时，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"供应商连接中断", purchaseUnknownProviderConnection, "购买结果尚未确认：与供应商的连接中断或请求被取消，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"供应商 HTTP 异常", purchaseUnknownProviderHTTP, "购买结果尚未确认：供应商返回服务异常或限流响应，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"供应商响应读取失败", purchaseUnknownProviderRead, "购买结果尚未确认：读取供应商响应时中断，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"供应商响应异常", purchaseUnknownProviderResponse, "购买结果尚未确认：供应商响应格式异常或内容过大，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"处理中记录已陈旧", purchaseUnknownStaleProvisioning, "购买结果尚未确认：上一次请求处理已中断或状态更新失败，系统无法确认供应商是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"超价取消未确认", "price_cancel_unknown", "购买结果尚未确认：供应商返回的价格超过所选价格，但取消结果未确认；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"订单保存结果未确认", "database_error", "购买结果尚未确认：供应商已返回号码，但本地订单保存结果未确认，系统无法判断订单是否已记录或号码是否已取消；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+		{"旧未知原因", "legacy_unknown", "购买结果尚未确认：系统未能确定供应商是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const (
+				userID = "operator-stored-unknown"
+				key    = "idem-stored-unknown-12345"
+			)
+			repo := newPurchaseRepository(domain.Provider{ID: domain.ProviderHeroSMS, Enabled: true})
+			repo.records[userID+"\x00"+key] = store.PurchaseRecord{
+				ID: "stored-unknown", UserID: userID, IdempotencyKey: key,
+				ProviderID: domain.ProviderHeroSMS, CountryCode: "2", ServiceCode: "tg",
+				MaxPrice: 1, Status: "unknown", ErrorCode: tt.storedCode,
+			}
+			_, callErr := purchaseService(t, repo).Purchase(
+				context.Background(), purchaseInput("1", key),
+				domain.User{ID: userID, Role: "operator"}, "127.0.0.1",
+			)
+			if !errors.Is(callErr, ErrConflict) {
+				t.Fatalf("错误=%v，期望结果待确认冲突", callErr)
+			}
+			requirePurchaseError(t, callErr, "purchase_result_unknown", tt.wantMessage)
 		})
 	}
 }
@@ -522,16 +719,73 @@ func TestPurchasePriceCancelFailureRemainsUnknown(t *testing.T) {
 	if !errors.Is(callErr, ErrConflict) {
 		t.Fatalf("取消失败错误=%v，期望结果待确认冲突", callErr)
 	}
-	requirePurchaseError(t, callErr, "purchase_result_unknown", "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, callErr, "purchase_result_unknown", "购买结果尚未确认：供应商返回的价格超过所选价格，但取消结果未确认；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	record, code, orders, _, completes := repo.snapshot(user.ID, key)
 	if record.Status != "unknown" || record.ErrorCode != "price_cancel_unknown" || code != "price_cancel_unknown" || orders != 0 || completes != 0 {
 		t.Fatalf("取消失败意图状态异常: record=%+v code=%q orders=%d completes=%d", record, code, orders, completes)
 	}
 
 	_, retryErr := service.Purchase(context.Background(), purchaseInput("10", key), user, "127.0.0.1")
-	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买")
+	requirePurchaseError(t, retryErr, "purchase_result_unknown", "购买结果尚未确认：供应商返回的价格超过所选价格，但取消结果未确认；为避免重复扣费，仅暂停当前平台与购买条件的重复提交")
 	if purchaseCalls.Load() != 1 || cancelCalls.Load() != 1 {
 		t.Fatalf("结果未知时不应重购: purchase=%d cancel=%d", purchaseCalls.Load(), cancelCalls.Load())
+	}
+}
+
+func TestPurchaseDatabaseFailureRemainsUnknownRegardlessOfCancellationOutcome(t *testing.T) {
+	tests := []struct {
+		name         string
+		cancelStatus int
+	}{
+		{name: "取消响应成功", cancelStatus: http.StatusNoContent},
+		{name: "取消响应失败", cancelStatus: http.StatusBadGateway},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var purchaseCalls, cancelCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodPost && request.URL.Path == "/api/v1/activations":
+					purchaseCalls.Add(1)
+					writer.Header().Set("Content-Type", "application/json")
+					_, _ = writer.Write([]byte(`{"data":[{"id":"database-failure-upstream","phone":"77001110000","price":0.2}]}`))
+				case request.Method == http.MethodDelete && request.URL.Path == "/api/v1/activations/database-failure-upstream":
+					cancelCalls.Add(1)
+					if tt.cancelStatus == http.StatusNoContent {
+						writer.WriteHeader(tt.cancelStatus)
+						return
+					}
+					http.Error(writer, "upstream unavailable", tt.cancelStatus)
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			vault, _ := secure.NewVault([]byte("purchase-database-failure-key"))
+			apiKey, _ := vault.Encrypt("provider-secret")
+			repo := newPurchaseRepository(domain.Provider{
+				ID: domain.ProviderHeroSMS, BaseURL: server.URL + "/api/v1", APIKeyCipher: apiKey, Enabled: true,
+			})
+			repo.completeErr = errors.New("database unavailable")
+			service := New(repo, nil, vault, config.Config{})
+			user := domain.User{ID: "operator-database-failure", Role: "operator"}
+			const key = "idem-database-failure-12345"
+			const message = "购买结果尚未确认：供应商已返回号码，但本地订单保存结果未确认，系统无法判断订单是否已记录或号码是否已取消；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+
+			_, callErr := service.Purchase(context.Background(), purchaseInput("1", key), user, "127.0.0.1")
+			requirePurchaseError(t, callErr, "database_error", message)
+			record, code, orders, _, completes := repo.snapshot(user.ID, key)
+			if record.Status != "unknown" || record.ErrorCode != "database_error" || code != "database_error" || orders != 0 || completes != 0 {
+				t.Fatalf("保存失败意图状态异常: record=%+v code=%q orders=%d completes=%d", record, code, orders, completes)
+			}
+
+			_, retryErr := service.Purchase(context.Background(), purchaseInput("1", key), user, "127.0.0.1")
+			requirePurchaseError(t, retryErr, "purchase_result_unknown", message)
+			if purchaseCalls.Load() != 1 || cancelCalls.Load() != 1 {
+				t.Fatalf("同编号重放不应重复调用供应商: purchase=%d cancel=%d", purchaseCalls.Load(), cancelCalls.Load())
+			}
+		})
 	}
 }
 

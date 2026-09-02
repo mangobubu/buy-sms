@@ -3,7 +3,12 @@ import type { NumberOrder, OrderQuery, PageResult, PurchasePayload } from '@/typ
 
 export const ordersApi = {
   create: (payload: PurchasePayload, idempotencyKey: string) =>
-    http.post<NumberOrder>('/orders', payload, { headers: { 'Idempotency-Key': idempotencyKey } }).then(unwrap),
+    http
+      .post<NumberOrder>('/orders', payload, {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        timeout: 50_000,
+      })
+      .then(unwrap),
   list: (query: OrderQuery) =>
     http.get<PageResult<NumberOrder> | NumberOrder[]>('/orders', { params: query }).then(unwrap),
   detail: (id: string) => http.get<NumberOrder>(`/orders/${id}`).then(unwrap),

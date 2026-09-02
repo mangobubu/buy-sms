@@ -69,6 +69,7 @@ export interface ProviderConfig {
   name: string
   apiBaseUrl: string
   enabled: boolean
+  purchasable: boolean
   pollingIntervalSeconds: number
   webhookSupported: boolean
   webhookEnabled?: boolean
@@ -76,6 +77,21 @@ export interface ProviderConfig {
   hasWebhookToken: boolean
   webhookUrl?: string
   updatedAt?: string
+}
+
+export type ProviderBalanceStatus = 'ok' | 'disabled' | 'unconfigured' | 'timeout' | 'unavailable'
+
+export interface ProviderBalance {
+  code: ProviderCode
+  name: string
+  enabled: boolean
+  purchasable: boolean
+  status: ProviderBalanceStatus
+  balance?: string
+  currency?: string
+  lastCheckedAt?: string
+  stale?: boolean
+  message?: string
 }
 
 export interface UpdateProviderPayload {

@@ -51,7 +51,7 @@ func run() error {
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go app.Run(rootCtx)
-	server := &http.Server{Addr: cfg.Address, Handler: httpapi.New(app, authentication, cfg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 40 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+	server := &http.Server{Addr: cfg.Address, Handler: httpapi.New(app, authentication, cfg), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 40 * time.Second, WriteTimeout: 55 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	result := make(chan error, 1)
 	go func() {
 		if cfg.Environment == "production" {

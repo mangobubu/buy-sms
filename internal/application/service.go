@@ -45,6 +45,15 @@ type PurchaseError struct {
 	Cause   error
 }
 
+const (
+	purchaseUnknownProviderTimeout    = "provider_timeout_unknown"
+	purchaseUnknownProviderConnection = "provider_connection_unknown"
+	purchaseUnknownProviderHTTP       = "provider_http_unknown"
+	purchaseUnknownProviderRead       = "provider_read_unknown"
+	purchaseUnknownProviderResponse   = "provider_response_unknown"
+	purchaseUnknownStaleProvisioning  = "stale_provisioning_unknown"
+)
+
 func (e *PurchaseError) Error() string { return e.Message }
 
 func (e *PurchaseError) Unwrap() []error {
@@ -64,9 +73,9 @@ func purchaseError(code string, cause error) *PurchaseError {
 	case "idempotency_mismatch":
 		err.Message, err.Kind = "该购买编号已用于其他条件，页面将生成新的购买请求", ErrConflict
 	case "purchase_in_progress":
-		err.Message, err.Kind = "购买请求正在处理中，可在“最近购买尝试”中查看状态", ErrConflict
+		err.Message, err.Kind = "购买请求仍在处理中，系统尚未收到最终结果；请等待最多2分钟，再使用当前请求重试确认；为避免重复扣费，仅暂停该请求的重复提交", ErrConflict
 	case "purchase_result_unknown":
-		err.Message, err.Kind = "购买结果尚未确认，请在“最近购买尝试”中查看状态，请勿重复购买", ErrConflict
+		return purchaseResultUnknownError("", cause)
 	case "price_exceeded":
 		err.Message, err.Kind = "供应商实际价格超过所选价格，购买已取消", ErrConflict
 	case "no_numbers":
@@ -80,18 +89,92 @@ func purchaseError(code string, cause error) *PurchaseError {
 	case "provider_disabled":
 		err.Message, err.Kind = "所选供应商已停用，请选择其他供应商", ErrConflict
 	case "provider_error":
-		err.Message, err.Kind = "供应商响应异常，请在“最近购买尝试”中查看状态，请勿重复购买", ErrProvider
+		return providerPurchaseError("provider_error", cause)
+	case "provider_preflight_error":
+		err.Message, err.Kind = "购买前获取供应商资源失败，号码购买尚未提交；可以重新提交当前平台与购买条件", ErrProvider
 	case "configuration":
 		err.Message, err.Kind = "供应商配置不完整，请联系管理员", ErrProvider
 	case "purchase_setup_failed":
 		err.Message = "购买准备失败，请稍后重试"
 	case "database_error":
-		err.Message = "购买结果保存异常，请在“最近购买尝试”中查看状态，请勿重复购买"
+		err.Message = purchaseResultUnknownError("database_error", nil).Message
 	default:
 		err.Code = "purchase_failed"
 		err.Message, err.Kind = "购买请求已失败，请刷新页面后重试", ErrConflict
 	}
 	return err
+}
+
+func purchaseResultUnknownError(reason string, cause error) *PurchaseError {
+	err := &PurchaseError{Code: "purchase_result_unknown", Kind: ErrConflict, Cause: cause}
+	switch reason {
+	case purchaseUnknownProviderTimeout:
+		err.Message = "购买结果尚未确认：供应商请求超时，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case purchaseUnknownProviderConnection:
+		err.Message = "购买结果尚未确认：与供应商的连接中断或请求被取消，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case purchaseUnknownProviderHTTP:
+		err.Message = "购买结果尚未确认：供应商返回服务异常或限流响应，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case purchaseUnknownProviderRead:
+		err.Message = "购买结果尚未确认：读取供应商响应时中断，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case purchaseUnknownProviderResponse:
+		err.Message = "购买结果尚未确认：供应商响应格式异常或内容过大，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case purchaseUnknownStaleProvisioning:
+		err.Message = "购买结果尚未确认：上一次请求处理已中断或状态更新失败，系统无法确认供应商是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case "provider_error":
+		err.Message = "购买结果尚未确认：供应商请求超时、连接中断或响应异常，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case "price_cancel_unknown":
+		err.Message = "购买结果尚未确认：供应商返回的价格超过所选价格，但取消结果未确认；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	case "database_error":
+		err.Message = "购买结果尚未确认：供应商已返回号码，但本地订单保存结果未确认，系统无法判断订单是否已记录或号码是否已取消；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	default:
+		err.Message = "购买结果尚未确认：系统未能确定供应商是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交"
+	}
+	return err
+}
+
+func providerPurchaseError(reason string, cause error) *PurchaseError {
+	err := purchaseResultUnknownError(reason, cause)
+	err.Code = "provider_error"
+	err.Kind = ErrProvider
+	return err
+}
+
+func providerPurchaseUnknownReason(err error) string {
+	var upstream *provider.ProviderError
+	if errors.As(err, &upstream) {
+		if upstream.HTTPStatus >= http.StatusInternalServerError || upstream.HTTPStatus == http.StatusTooManyRequests {
+			return purchaseUnknownProviderHTTP
+		}
+		switch strings.ToUpper(strings.TrimSpace(upstream.Code)) {
+		case "TIMEOUT":
+			return purchaseUnknownProviderTimeout
+		case "TRANSPORT_ERROR", "NO_CONNECTION", "CANCELED":
+			return purchaseUnknownProviderConnection
+		case "READ_ERROR":
+			return purchaseUnknownProviderRead
+		case "INVALID_RESPONSE", "RESPONSE_TOO_LARGE":
+			return purchaseUnknownProviderResponse
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return purchaseUnknownProviderTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return purchaseUnknownProviderConnection
+	}
+	return "provider_error"
+}
+
+func purchaseAttemptErrorCode(status, reason string) string {
+	if status != "unknown" {
+		return reason
+	}
+	switch reason {
+	case purchaseUnknownProviderTimeout, purchaseUnknownProviderConnection, purchaseUnknownProviderHTTP, purchaseUnknownProviderRead, purchaseUnknownProviderResponse:
+		return "provider_error"
+	default:
+		return reason
+	}
 }
 
 type Service struct {
@@ -103,6 +186,24 @@ type Service struct {
 	accountingRecovery      chan accountingRecovery
 	accountingFallbackSlots chan struct{}
 	now                     func() time.Time
+	balanceMu               sync.Mutex
+	balanceCache            map[string]providerBalanceCacheEntry
+	balanceCalls            map[string]*providerBalanceCall
+	balanceEpoch            map[string]uint64
+}
+
+type providerBalanceCacheEntry struct {
+	result    provider.BalanceResult
+	checkedAt time.Time
+	err       error
+	expiresAt time.Time
+}
+
+type providerBalanceCall struct {
+	done      chan struct{}
+	result    provider.BalanceResult
+	checkedAt time.Time
+	err       error
 }
 
 type accountingRecovery struct {
@@ -111,7 +212,13 @@ type accountingRecovery struct {
 }
 
 func New(repo store.Repository, authentication *auth.Service, vault *secure.Vault, cfg config.Config) *Service {
-	return &Service{repo: repo, auth: authentication, vault: vault, config: cfg, afterMessage: make(chan domain.Order, 128), accountingRecovery: make(chan accountingRecovery, 128), accountingFallbackSlots: make(chan struct{}, 2), now: time.Now}
+	return &Service{
+		repo: repo, auth: authentication, vault: vault, config: cfg,
+		afterMessage: make(chan domain.Order, 128), accountingRecovery: make(chan accountingRecovery, 128),
+		accountingFallbackSlots: make(chan struct{}, 2), now: time.Now,
+		balanceCache: make(map[string]providerBalanceCacheEntry), balanceCalls: make(map[string]*providerBalanceCall),
+		balanceEpoch: make(map[string]uint64),
+	}
 }
 
 func (s *Service) Bootstrap(ctx context.Context) error {
@@ -189,6 +296,174 @@ func (s *Service) Providers(ctx context.Context) ([]ProviderDTO, error) {
 	}
 	return out, nil
 }
+
+func (s *Service) ProviderBalances(ctx context.Context, user domain.User) ([]ProviderBalanceDTO, error) {
+	ps, err := s.repo.ListProviders(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]ProviderBalanceDTO, len(ps))
+	var wait sync.WaitGroup
+	for index := range ps {
+		p := ps[index]
+		configured := p.APIKeyConfigured || len(p.APIKeyCipher) > 0
+		out[index] = ProviderBalanceDTO{Code: p.ID, Name: p.Name, Enabled: p.Enabled, Purchasable: p.Enabled && configured}
+		if !p.Enabled {
+			out[index].Status = "disabled"
+			out[index].Message = "接口未启用"
+			continue
+		}
+		if !configured {
+			if user.Role == "admin" {
+				out[index].Status = "unconfigured"
+				out[index].Message = "尚未配置 API Key"
+			} else {
+				checkedAt := s.now().UTC()
+				out[index].LastCheckedAt = &checkedAt
+				out[index].Status = "unavailable"
+				out[index].Message = "余额暂不可用"
+			}
+			continue
+		}
+
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			balance, checkedAt, balanceErr := s.providerBalance(ctx, p)
+			out[index].LastCheckedAt = &checkedAt
+			if balanceErr != nil {
+				if providerBalanceConfigurationError(balanceErr) {
+					out[index].Purchasable = false
+					if user.Role == "admin" {
+						out[index].Status = "unconfigured"
+						out[index].Message = "供应商配置不可用"
+					} else {
+						out[index].Status = "unavailable"
+						out[index].Message = "余额暂不可用"
+					}
+					return
+				}
+				if errors.Is(balanceErr, context.DeadlineExceeded) {
+					out[index].Status = "timeout"
+					out[index].Message = "余额查询超时"
+				} else {
+					out[index].Status = "unavailable"
+					out[index].Message = "余额获取失败"
+				}
+				return
+			}
+			out[index].Status = "ok"
+			out[index].Balance = balance.Amount
+			out[index].Currency = balance.Currency
+		}()
+	}
+	wait.Wait()
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func providerBalanceConfigurationError(err error) bool {
+	if errors.Is(err, ErrBadRequest) || errors.Is(err, ErrConflict) || errors.Is(err, provider.ErrInvalidRequest) {
+		return true
+	}
+	var upstream *provider.ProviderError
+	if !errors.As(err, &upstream) {
+		return false
+	}
+	if upstream.HTTPStatus == http.StatusUnauthorized || upstream.HTTPStatus == http.StatusForbidden {
+		return true
+	}
+	switch strings.ToUpper(strings.TrimSpace(upstream.Code)) {
+	case "BAD_KEY", "ACCOUNT_INACTIVE", "BANNED", "INVALID_BASE_URL", "INVALID_REQUEST":
+		return true
+	default:
+		return false
+	}
+}
+
+const (
+	providerBalanceFreshTTL   = 5 * time.Second
+	providerBalanceFailureTTL = 2 * time.Second
+	providerBalanceTimeout    = 5 * time.Second
+)
+
+func (s *Service) providerBalance(ctx context.Context, p domain.Provider) (provider.BalanceResult, time.Time, error) {
+	now := s.now().UTC()
+	s.balanceMu.Lock()
+	epoch := s.balanceEpoch[p.ID]
+	cacheKey := fmt.Sprintf("%s|%d|%d", p.ID, epoch, p.UpdatedAt.UnixNano())
+	if cached, found := s.balanceCache[cacheKey]; found && now.Before(cached.expiresAt) {
+		s.balanceMu.Unlock()
+		return cached.result, cached.checkedAt, cached.err
+	}
+	if call, found := s.balanceCalls[cacheKey]; found {
+		s.balanceMu.Unlock()
+		select {
+		case <-call.done:
+			return call.result, call.checkedAt, call.err
+		case <-ctx.Done():
+			return provider.BalanceResult{}, now, ctx.Err()
+		}
+	}
+	call := &providerBalanceCall{done: make(chan struct{})}
+	s.balanceCalls[cacheKey] = call
+	s.balanceMu.Unlock()
+
+	checkedAt := s.now().UTC()
+	queryCtx, cancel := context.WithTimeout(context.Background(), providerBalanceTimeout)
+	result, queryErr := s.fetchProviderBalance(queryCtx, p)
+	cancel()
+	ttl := providerBalanceFreshTTL
+	if queryErr != nil {
+		ttl = providerBalanceFailureTTL
+	}
+
+	s.balanceMu.Lock()
+	call.result, call.checkedAt, call.err = result, checkedAt, queryErr
+	if s.balanceEpoch[p.ID] == epoch {
+		s.balanceCache[cacheKey] = providerBalanceCacheEntry{
+			result: result, checkedAt: checkedAt, err: queryErr, expiresAt: s.now().UTC().Add(ttl),
+		}
+	}
+	delete(s.balanceCalls, cacheKey)
+	close(call.done)
+	s.balanceMu.Unlock()
+	return result, checkedAt, queryErr
+}
+
+func (s *Service) fetchProviderBalance(ctx context.Context, p domain.Provider) (provider.BalanceResult, error) {
+	key, err := s.vault.Decrypt(p.APIKeyCipher)
+	if err != nil || strings.TrimSpace(key) == "" {
+		return provider.BalanceResult{}, ErrConflict
+	}
+	if s.config.Environment == "production" {
+		if _, err = validateProviderURL(ctx, p.ID, p.BaseURL, true); err != nil {
+			return provider.BalanceResult{}, ErrBadRequest
+		}
+	}
+	client, err := provider.New(p.ID, p.BaseURL, provider.WithTimeout(providerBalanceTimeout))
+	if err != nil {
+		return provider.BalanceResult{}, err
+	}
+	return client.Balance(ctx, key)
+}
+
+func (s *Service) invalidateProviderBalance(providerID string) {
+	providerID = domain.NormalizeProvider(providerID)
+	s.balanceMu.Lock()
+	s.balanceEpoch[providerID]++
+	prefix := providerID + "|"
+	for key := range s.balanceCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.balanceCache, key)
+		}
+	}
+	s.balanceMu.Unlock()
+}
+
 func (s *Service) UpdateProvider(ctx context.Context, id string, in UpdateProviderInput, user domain.User, ip string) (ProviderDTO, error) {
 	id = domain.NormalizeProvider(id)
 	p, err := s.repo.GetProvider(ctx, id)
@@ -227,6 +502,7 @@ func (s *Service) UpdateProvider(ctx context.Context, id string, in UpdateProvid
 	if err = s.repo.UpdateProvider(ctx, p); err != nil {
 		return ProviderDTO{}, mapStore(err)
 	}
+	s.invalidateProviderBalance(p.ID)
 	_ = s.repo.Audit(ctx, &user.ID, "provider.update", "provider", p.ID, ip, nil)
 	p, err = s.repo.GetProvider(ctx, id)
 	if err != nil {
@@ -241,7 +517,8 @@ func (s *Service) providerView(p domain.Provider) (ProviderDTO, error) {
 	if err != nil {
 		return ProviderDTO{}, err
 	}
-	return ProviderDTO{ID: p.ID, Code: p.ID, Name: p.Name, APIBaseURL: p.BaseURL, Enabled: p.Enabled, PollingIntervalSeconds: settings.PollingIntervalSeconds, WebhookSupported: true, WebhookEnabled: settings.WebhookEnabled, HasAPIKey: p.APIKeyConfigured, HasWebhookToken: p.WebhookConfigured, WebhookURL: s.config.PublicBaseURL + "/api/webhooks/" + p.ID + "/" + url.PathEscape(token), UpdatedAt: p.UpdatedAt}, nil
+	configured := p.APIKeyConfigured || len(p.APIKeyCipher) > 0
+	return ProviderDTO{ID: p.ID, Code: p.ID, Name: p.Name, APIBaseURL: p.BaseURL, Enabled: p.Enabled, PollingIntervalSeconds: settings.PollingIntervalSeconds, WebhookSupported: true, WebhookEnabled: settings.WebhookEnabled, HasAPIKey: configured, Purchasable: p.Enabled && configured, HasWebhookToken: p.WebhookConfigured, WebhookURL: s.config.PublicBaseURL + "/api/webhooks/" + p.ID + "/" + url.PathEscape(token), UpdatedAt: p.UpdatedAt}, nil
 }
 
 func (s *Service) Countries(ctx context.Context, pid, service, tier string) ([]CountryDTO, error) {
@@ -446,13 +723,21 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		}
 		switch record.Status {
 		case "provisioning":
+			updatedAt := record.UpdatedAt
+			if updatedAt.IsZero() {
+				updatedAt = record.CreatedAt
+			}
+			if !updatedAt.IsZero() && !s.now().Before(updatedAt.Add(2*time.Minute)) {
+				s.failPurchase(record.ID, "unknown", purchaseUnknownStaleProvisioning)
+				return OrderDTO{}, purchaseResultUnknownError(purchaseUnknownStaleProvisioning, nil)
+			}
 			return OrderDTO{}, purchaseError("purchase_in_progress", nil)
 		case "unknown":
-			return OrderDTO{}, purchaseError("purchase_result_unknown", nil)
+			return OrderDTO{}, purchaseResultUnknownError(record.ErrorCode, nil)
 		case "failed":
 			return OrderDTO{}, purchaseError(record.ErrorCode, nil)
 		default:
-			return OrderDTO{}, purchaseError("purchase_result_unknown", nil)
+			return OrderDTO{}, purchaseResultUnknownError(record.ErrorCode, nil)
 		}
 	}
 	p, key, client, err := s.providerClient(ctx, pid)
@@ -469,18 +754,25 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		return OrderDTO{}, purchaseError("provider_disabled", nil)
 	}
 	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, MaxPrice: &max})
+	s.invalidateProviderBalance(pid)
 	if err != nil {
 		status, code := classifyProviderPurchaseError(err)
+		if status == "unknown" && code == "provider_error" {
+			reason := providerPurchaseUnknownReason(err)
+			s.failPurchase(record.ID, status, reason)
+			return OrderDTO{}, providerPurchaseError(reason, err)
+		}
 		s.failPurchase(record.ID, status, code)
 		return OrderDTO{}, purchaseError(code, err)
 	}
 	if result.Cost > max+0.000001 {
-		cancelCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if cancelErr := client.Cancel(cancelCtx, key, result.UpstreamID); cancelErr != nil {
 			s.failPurchase(record.ID, "unknown", "price_cancel_unknown")
-			return OrderDTO{}, purchaseError("purchase_result_unknown", cancelErr)
+			return OrderDTO{}, purchaseResultUnknownError("price_cancel_unknown", cancelErr)
 		}
+		s.invalidateProviderBalance(pid)
 		s.failPurchase(record.ID, "failed", "price_exceeded")
 		return OrderDTO{}, purchaseError("price_exceeded", nil)
 	}
@@ -489,9 +781,11 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		o.Currency = "USD"
 	}
 	if err = s.repo.CompletePurchase(ctx, record.ID, o); err != nil {
-		cancelCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = client.Cancel(cancelCtx, key, result.UpstreamID)
+		if cancelErr := client.Cancel(cancelCtx, key, result.UpstreamID); cancelErr == nil {
+			s.invalidateProviderBalance(pid)
+		}
 		s.failPurchase(record.ID, "unknown", "database_error")
 		return OrderDTO{}, purchaseError("database_error", mapStore(err))
 	}
@@ -512,12 +806,30 @@ func classifyProviderPurchaseError(err error) (status, code string) {
 	if !errors.As(err, &upstream) {
 		return "unknown", "provider_error"
 	}
+	providerCode := strings.ToUpper(strings.TrimSpace(upstream.Code))
+	operation := strings.ToLower(strings.TrimSpace(upstream.Operation))
+	if strings.HasPrefix(operation, "catalog.") || operation == "purchase.tier" {
+		switch providerCode {
+		case "NO_NUMBERS", "OUT_OF_STOCK":
+			return "failed", "no_numbers"
+		case "BAD_SERVICE", "BAD_COUNTRY":
+			return "failed", "invalid_selection"
+		case "BAD_KEY", "BAD_ACTION", "BAD_STATUS", "NO_ACTIVATION", "EARLY_CANCEL_DENIED", "ACCOUNT_INACTIVE", "BANNED", "INVALID_BASE_URL", "INVALID_REQUEST":
+			return "failed", "configuration"
+		case "RATE_LIMIT":
+			return "failed", "provider_rate_limited"
+		default:
+			// SMSBower 等级购买的目录与位置查询发生在真正下单之前，
+			// 即使这里超时或返回 5xx，也可以确定尚未生成号码。
+			return "failed", "provider_preflight_error"
+		}
+	}
 	// HTTP 5xx 和 429 可能发生在上游已创建号码之后。
 	// 即使响应正文包含看似确定的业务码，也不能据此允许新幂等键重购。
 	if upstream.HTTPStatus >= http.StatusInternalServerError || upstream.HTTPStatus == http.StatusTooManyRequests {
 		return "unknown", "provider_error"
 	}
-	switch strings.ToUpper(strings.TrimSpace(upstream.Code)) {
+	switch providerCode {
 	case "MAX_PRICE_EXCEEDED", "WRONG_MAX_PRICE":
 		return "failed", "price_exceeded"
 	case "NO_NUMBERS", "OUT_OF_STOCK":
@@ -540,7 +852,7 @@ func classifyProviderPurchaseError(err error) (status, code string) {
 }
 
 func (s *Service) failPurchase(id, status, code string) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := s.repo.FailPurchase(cleanupCtx, id, status, code); err != nil {
 		slog.Error("更新购买意图失败", "purchase_id", id, "status", status, "error", err)
@@ -563,7 +875,7 @@ func (s *Service) PurchaseAttempts(ctx context.Context, user domain.User) ([]Pur
 			QualityTier: record.QualityTier,
 			MaxPrice:    strconv.FormatFloat(record.MaxPrice, 'f', -1, 64),
 			Status:      record.Status,
-			ErrorCode:   record.ErrorCode,
+			ErrorCode:   purchaseAttemptErrorCode(record.Status, record.ErrorCode),
 			Message:     purchaseAttemptMessage(record.Status, record.ErrorCode),
 			CreatedAt:   record.CreatedAt,
 			UpdatedAt:   record.UpdatedAt,
@@ -579,11 +891,11 @@ func purchaseAttemptMessage(status, errorCode string) string {
 	case "provisioning":
 		return purchaseError("purchase_in_progress", nil).Message
 	case "unknown":
-		return purchaseError("purchase_result_unknown", nil).Message
+		return purchaseResultUnknownError(errorCode, nil).Message
 	case "failed":
 		return purchaseError(errorCode, nil).Message
 	default:
-		return purchaseError("purchase_result_unknown", nil).Message
+		return purchaseResultUnknownError(errorCode, nil).Message
 	}
 }
 
@@ -649,12 +961,16 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 		}
 		status := domain.OrderCompleted
 		if action == "cancel" {
-			if err = client.Cancel(lockCtx, key, o.UpstreamID); err != nil {
+			err = client.Cancel(lockCtx, key, o.UpstreamID)
+			s.invalidateProviderBalance(o.ProviderID)
+			if err != nil {
 				return ErrProvider
 			}
 			status = domain.OrderCanceled
 		} else {
-			if err = client.Complete(lockCtx, key, o.UpstreamID); err != nil {
+			err = client.Complete(lockCtx, key, o.UpstreamID)
+			s.invalidateProviderBalance(o.ProviderID)
+			if err != nil {
 				return ErrProvider
 			}
 		}
@@ -1220,6 +1536,7 @@ func (s *Service) requestAnother(parent context.Context, o domain.Order) {
 			return nil
 		}
 		result, err := client.RequestAnother(lockCtx, key, fresh.UpstreamID)
+		s.invalidateProviderBalance(fresh.ProviderID)
 		if err != nil {
 			slog.Warn("请求继续接收短信失败", "provider", fresh.ProviderID, "order_id", fresh.ID)
 			s.restoreRequestNext(fresh)

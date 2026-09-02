@@ -57,6 +57,7 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.POST("/auth/change-password", h.changePassword)
 	authed.GET("/dashboard", h.dashboard)
 	authed.GET("/providers", h.providers)
+	authed.GET("/providers/balances", h.providerBalances)
 	authed.PUT("/providers/:id", h.requireAdmin(), h.updateProvider)
 	authed.GET("/catalog/countries", h.countries)
 	authed.GET("/catalog/services", h.services)
@@ -246,6 +247,14 @@ func (h *Handler) providers(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, value)
 }
+func (h *Handler) providerBalances(c *gin.Context) {
+	value, err := h.app.ProviderBalances(c.Request.Context(), currentUser(c))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
 func (h *Handler) updateProvider(c *gin.Context) {
 	var in application.UpdateProviderInput
 	if !bind(c, &in) {
@@ -428,7 +437,7 @@ func respondError(c *gin.Context, err error) {
 			status = http.StatusBadRequest
 		case "provider_rate_limited":
 			status = http.StatusTooManyRequests
-		case "provider_error", "configuration", "insufficient_balance":
+		case "provider_error", "provider_preflight_error", "configuration", "insufficient_balance":
 			status = http.StatusBadGateway
 		}
 		if status == http.StatusInternalServerError {

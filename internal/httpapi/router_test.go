@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ func TestProtectedAPIRoutesRejectMissingAuthentication(t *testing.T) {
 		"/api/auth/me",
 		"/api/dashboard",
 		"/api/providers",
+		"/api/providers/balances",
 		"/api/orders",
 		"/api/users",
 	} {
@@ -164,6 +167,9 @@ func TestProvidersHideConfigurationFromOperator(t *testing.T) {
 	if operatorView["apiBaseUrl"] != "" || operatorView["hasApiKey"] != false || operatorView["hasWebhookToken"] != false {
 		t.Fatalf("operator 响应暴露供应商配置细节: %v", operatorView)
 	}
+	if operatorView["purchasable"] != true {
+		t.Fatalf("operator 应获得安全的可采购状态: %v", operatorView)
+	}
 
 	adminResponse := performAuthenticatedRequest(router, http.MethodGet, "/api/providers", "admin-token")
 	if adminResponse.Code != http.StatusOK {
@@ -179,8 +185,142 @@ func TestProvidersHideConfigurationFromOperator(t *testing.T) {
 	if !strings.HasSuffix(actualWebhookURL, expectedWebhookURL) {
 		t.Fatalf("admin webhookUrl=%q，期望后缀=%q", actualWebhookURL, expectedWebhookURL)
 	}
-	if adminView["apiBaseUrl"] != "https://provider.example/api/v1" || adminView["hasApiKey"] != true || adminView["hasWebhookToken"] != true {
+	if adminView["apiBaseUrl"] != "https://provider.example/api/v1" || adminView["hasApiKey"] != true || adminView["purchasable"] != true || adminView["hasWebhookToken"] != true {
 		t.Fatalf("admin 应看到供应商配置状态: %v", adminView)
+	}
+}
+
+func TestProviderBalancesReportRealtimeAndNonQueryableStates(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	providerServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		if request.URL.Path != "/stubs/handler_api.php" || request.URL.Query().Get("action") != "getBalance" || request.URL.Query().Get("api_key") != "balance-secret" {
+			t.Errorf("余额请求不正确: %s", request.URL.String())
+			http.Error(writer, "BAD_REQUEST", http.StatusBadRequest)
+			return
+		}
+		_, _ = writer.Write([]byte("ACCESS_BALANCE:12.30"))
+	}))
+	t.Cleanup(providerServer.Close)
+
+	repo := newMemoryRepository()
+	router, _, vault := newTestRouter(t, repo)
+	keyCipher, err := vault.Encrypt("balance-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.putProvider(domain.Provider{
+		ID: domain.ProviderHeroSMS, Name: "HeroSMS", Enabled: false,
+		BaseURL: providerServer.URL + "/api/v1", APIKeyCipher: keyCipher, APIKeyConfigured: true,
+	})
+	repo.putProvider(domain.Provider{
+		ID: domain.ProviderSMSBower, Name: "SMSBower", Enabled: true,
+		BaseURL: providerServer.URL + "/stubs/handler_api.php", APIKeyCipher: keyCipher, APIKeyConfigured: true,
+	})
+	repo.putProvider(domain.Provider{
+		ID: domain.ProviderSMSPool, Name: "SMSPool", Enabled: true,
+		BaseURL: providerServer.URL,
+	})
+	admin := domain.User{ID: "admin-balance", Username: "admin", Role: "admin", Active: true}
+	operator := domain.User{ID: "operator-balance", Username: "operator", Role: "operator", Active: true}
+	repo.putSession([]byte("router-test-session-pepper"), "admin-balance-token", admin)
+	repo.putSession([]byte("router-test-session-pepper"), "operator-balance-token", operator)
+
+	for _, testCase := range []struct {
+		name               string
+		token              string
+		unconfiguredStatus string
+	}{
+		{name: "管理员可见未配置状态", token: "admin-balance-token", unconfiguredStatus: "unconfigured"},
+		{name: "操作员只见不可用状态", token: "operator-balance-token", unconfiguredStatus: "unavailable"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			response := performAuthenticatedRequest(router, http.MethodGet, "/api/providers/balances", testCase.token)
+			if response.Code != http.StatusOK {
+				t.Fatalf("余额状态码=%d，响应=%s", response.Code, response.Body.String())
+			}
+			if cacheControl := response.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
+				t.Fatalf("余额响应 Cache-Control=%q", cacheControl)
+			}
+			var balances []application.ProviderBalanceDTO
+			if err := json.Unmarshal(response.Body.Bytes(), &balances); err != nil {
+				t.Fatal(err)
+			}
+			if len(balances) != 3 {
+				t.Fatalf("余额数量=%d，响应=%s", len(balances), response.Body.String())
+			}
+			byCode := make(map[string]application.ProviderBalanceDTO, len(balances))
+			for _, balance := range balances {
+				byCode[balance.Code] = balance
+			}
+			if got := byCode[domain.ProviderHeroSMS]; got.Status != "disabled" || got.Balance != "" {
+				t.Fatalf("停用供应商余额状态异常: %+v", got)
+			}
+			if got := byCode[domain.ProviderHeroSMS]; got.Purchasable {
+				t.Fatalf("停用供应商不应可采购: %+v", got)
+			}
+			if got := byCode[domain.ProviderSMSBower]; got.Status != "ok" || !got.Purchasable || got.Balance != "12.30" || got.Currency != "USD" || got.LastCheckedAt == nil {
+				t.Fatalf("实时余额异常: %+v", got)
+			}
+			if got := byCode[domain.ProviderSMSPool]; got.Status != testCase.unconfiguredStatus || got.Purchasable || got.Balance != "" {
+				t.Fatalf("未配置供应商余额状态异常: %+v", got)
+			}
+			encoded := response.Body.String()
+			if strings.Contains(encoded, "balance-secret") || strings.Contains(encoded, providerServer.URL) {
+				t.Fatalf("余额响应泄漏敏感配置: %s", encoded)
+			}
+		})
+	}
+	if calls := upstreamCalls.Load(); calls != 1 {
+		t.Fatalf("仅已启用且已配置的供应商应访问上游，且短时间重复请求应复用缓存；实际调用=%d", calls)
+	}
+}
+
+func TestProviderBalancesCollapseConcurrentUpstreamRequests(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	providerServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		_, _ = writer.Write([]byte("ACCESS_BALANCE:4.20"))
+	}))
+	t.Cleanup(providerServer.Close)
+
+	repo := newMemoryRepository()
+	router, _, vault := newTestRouter(t, repo)
+	keyCipher, err := vault.Encrypt("concurrent-balance-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.putProvider(domain.Provider{
+		ID: domain.ProviderSMSBower, Name: "SMSBower", Enabled: true,
+		BaseURL: providerServer.URL + "/stubs/handler_api.php", APIKeyCipher: keyCipher, APIKeyConfigured: true,
+	})
+	operator := domain.User{ID: "operator-concurrent-balance", Username: "operator", Role: "operator", Active: true}
+	repo.putSession([]byte("router-test-session-pepper"), "concurrent-balance-token", operator)
+
+	const requests = 8
+	start := make(chan struct{})
+	statusCodes := make(chan int, requests)
+	var wait sync.WaitGroup
+	for range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			response := performAuthenticatedRequest(router, http.MethodGet, "/api/providers/balances", "concurrent-balance-token")
+			statusCodes <- response.Code
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(statusCodes)
+	for status := range statusCodes {
+		if status != http.StatusOK {
+			t.Fatalf("并发余额状态码=%d", status)
+		}
+	}
+	if calls := upstreamCalls.Load(); calls != 1 {
+		t.Fatalf("并发余额请求未合并，上游调用=%d", calls)
 	}
 }
 

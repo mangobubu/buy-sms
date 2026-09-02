@@ -39,12 +39,19 @@ var (
 // 每次调用时传入，以便密钥始终只存在于服务端内存中。
 type Client interface {
 	ID() string
+	Balance(context.Context, string) (BalanceResult, error)
 	Catalog(context.Context, string, CatalogRequest) ([]domain.CatalogItem, error)
 	Purchase(context.Context, string, PurchaseRequest) (PurchaseResult, error)
 	Poll(context.Context, string, string) (PollResult, error)
 	Complete(context.Context, string, string) error
 	Cancel(context.Context, string, string) error
 	RequestAnother(context.Context, string, string) (RequestAnotherResult, error)
+}
+
+// BalanceResult 保留供应商返回的十进制文本，避免展示时丢失精度或尾随零。
+type BalanceResult struct {
+	Amount   string
+	Currency string
 }
 
 type CatalogRequest struct {

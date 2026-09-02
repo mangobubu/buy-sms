@@ -17,9 +17,23 @@ type ProviderDTO struct {
 	WebhookSupported       bool      `json:"webhookSupported"`
 	WebhookEnabled         bool      `json:"webhookEnabled"`
 	HasAPIKey              bool      `json:"hasApiKey"`
+	Purchasable            bool      `json:"purchasable"`
 	HasWebhookToken        bool      `json:"hasWebhookToken"`
 	WebhookURL             string    `json:"webhookUrl,omitempty"`
 	UpdatedAt              time.Time `json:"updatedAt"`
+}
+
+type ProviderBalanceDTO struct {
+	Code          string     `json:"code"`
+	Name          string     `json:"name"`
+	Enabled       bool       `json:"enabled"`
+	Purchasable   bool       `json:"purchasable"`
+	Status        string     `json:"status"`
+	Balance       string     `json:"balance,omitempty"`
+	Currency      string     `json:"currency,omitempty"`
+	LastCheckedAt *time.Time `json:"lastCheckedAt,omitempty"`
+	Stale         bool       `json:"stale,omitempty"`
+	Message       string     `json:"message,omitempty"`
 }
 
 type UpdateProviderInput struct {

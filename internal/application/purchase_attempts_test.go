@@ -34,7 +34,7 @@ func TestPurchaseAttemptsUseCurrentUserScopeAndSafeDTO(t *testing.T) {
 		},
 		{
 			ProviderID: domain.ProviderSMSPool, CountryCode: "US", ServiceCode: "wa",
-			MaxPrice: 1, Status: "unknown", ErrorCode: "provider_error", CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
+			MaxPrice: 1, Status: "unknown", ErrorCode: purchaseUnknownProviderTimeout, CreatedAt: now.Add(-time.Minute), UpdatedAt: now,
 		},
 	}}
 	service := New(repo, nil, nil, config.Config{})
@@ -56,7 +56,10 @@ func TestPurchaseAttemptsUseCurrentUserScopeAndSafeDTO(t *testing.T) {
 		t.Fatalf("失败购买尝试消息或时间错误: %+v", failed)
 	}
 	unknown := attempts[1]
-	if !strings.Contains(unknown.Message, "最近购买尝试") || !strings.Contains(unknown.Message, "请勿重复购买") {
-		t.Fatalf("未知结果消息应指向购买尝试: %q", unknown.Message)
+	if unknown.ErrorCode != "provider_error" || unknown.Message != "购买结果尚未确认：供应商请求超时，系统无法确认是否已生成号码；为避免重复扣费，仅暂停当前平台与购买条件的重复提交" {
+		t.Fatalf("未知结果消息未说明供应商响应异常: %q", unknown.Message)
+	}
+	if strings.Contains(unknown.Message, "最近购买尝试") {
+		t.Fatalf("未知结果消息引用了已移除的板块: %q", unknown.Message)
 	}
 }

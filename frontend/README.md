@@ -48,6 +48,7 @@ npm run build
 | --- | --- | --- |
 | GET | `/dashboard` | 仪表盘汇总 |
 | GET | `/providers` | 供应商配置列表 |
+| GET | `/providers/balances` | 查询供应商实时余额与启用状态 |
 | PUT | `/providers/:id` | 更新 API 地址、密钥、Webhook 启用状态、供应商启用状态和轮询间隔 |
 | GET | `/catalog/services?provider=` | 可购买服务；兼容可选 `country` 参数 |
 | GET | `/catalog/countries?provider=&service=&tier=` | 按服务查询可购买国家；`tier` 仅用于 SMSBower |
@@ -62,7 +63,7 @@ npm run build
 | PUT | `/users/:id` | 更新用户 |
 
 供应商规范代码为 `herosms`、`smsbower`、`smspool`。完整 DTO 位于 `src/types/api.ts`。
-购买页统一先选服务再选国家。SMSBower 会合并 `bronze`、`silver`、`gold` 三个等级的可用资源，并在价格选项中展示等级；选择价格时会同时确定下单等级，无需单独选择。切换供应商时，页面会分别保留各供应商当前的服务、国家和价格选择；切换到其他管理页面再返回时，会恢复供应商、服务和国家，并重新加载实时报价，价格需要重新选择。
+购买页统一先选服务再选国家。SMSBower 会合并 `bronze`、`silver`、`gold` 三个等级的可用资源，并在价格选项中展示等级；选择价格时会同时确定下单等级，无需单独选择。切换供应商时，页面会分别保留各供应商当前的服务、国家和价格选择；切换到其他管理页面再返回时，会恢复供应商、服务和国家，并重新加载实时报价，价格需要重新选择。供应商卡片会定时刷新实时余额；停用或未配置的供应商仍会显示，但不允许用于采购，余额显示为不可查询状态。
 
 ## 持续收码规则
 

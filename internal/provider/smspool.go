@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strconv"
 	"strings"
@@ -24,6 +25,50 @@ func NewSMSPool(baseURL string, options ...Option) *SMSPool {
 }
 
 func (c *SMSPool) ID() string { return domain.ProviderSMSPool }
+
+func (c *SMSPool) Balance(ctx context.Context, apiKey string) (BalanceResult, error) {
+	if err := require(apiKey); err != nil {
+		return BalanceResult{}, err
+	}
+	payload, err := c.http.form(ctx, "balance", apiKey, "request/balance", make(url.Values))
+	if err != nil {
+		return BalanceResult{}, err
+	}
+	if businessErr := c.ensureSuccess("balance", apiKey, payload, false); businessErr != nil {
+		return BalanceResult{}, businessErr
+	}
+	amount, ok := smsPoolBalanceAmount(payload)
+	if !ok {
+		return BalanceResult{}, c.http.failure("balance", "INVALID_RESPONSE", 0, false, nil)
+	}
+	return BalanceResult{Amount: amount, Currency: "USD"}, nil
+}
+
+func smsPoolBalanceAmount(payload []byte) (string, bool) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &object); err != nil {
+		return "", false
+	}
+	var raw json.RawMessage
+	for key, value := range object {
+		if strings.EqualFold(key, "balance") {
+			raw = value
+			break
+		}
+	}
+	if len(raw) == 0 {
+		return "", false
+	}
+	var amount string
+	if raw[0] == '"' {
+		if err := json.Unmarshal(raw, &amount); err != nil {
+			return "", false
+		}
+	} else {
+		amount = string(raw)
+	}
+	return validBalanceAmount(amount)
+}
 
 func (c *SMSPool) Catalog(ctx context.Context, apiKey string, request CatalogRequest) ([]domain.CatalogItem, error) {
 	if strings.TrimSpace(request.QualityTier) != "" {
