@@ -137,6 +137,13 @@ func TestPurchaseAttemptNamesUseProviderCatalogContract(t *testing.T) {
 	}
 }
 
+func TestDashboardTodayCostExcludesCanceledOrders(t *testing.T) {
+	query := strings.Join(strings.Fields(strings.ToLower(dashboardSQL)), " ")
+	if !strings.Contains(query, "sum(cost) filter ( where created_at >= date_trunc('day', now()) and status <> 'canceled' )") {
+		t.Fatalf("今日支出 SQL 未排除取消号码: %s", query)
+	}
+}
+
 var _ maintenanceContract = (*Postgres)(nil)
 
 // Maintenance 的 SQL 执行依赖真实 pgx 连接，当前 Postgres 没有可注入的窄

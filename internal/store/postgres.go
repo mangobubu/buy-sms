@@ -784,9 +784,28 @@ func (s *Postgres) SaveWebhookEvent(ctx context.Context, w WebhookRecord) (bool,
 	ct, err := s.pool.Exec(ctx, `INSERT INTO webhook_events(id,provider_id,upstream_id,fingerprint,headers,payload,processing_status,processing_error,received_at,processed_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) ON CONFLICT(provider_id,fingerprint) DO NOTHING`, w.ID, w.ProviderID, w.UpstreamID, w.Fingerprint, w.Headers, w.Payload, w.Status, w.Error, w.ReceivedAt)
 	return err == nil && ct.RowsAffected() == 1, err
 }
+
+const dashboardSQL = `
+SELECT
+	count(*) FILTER (WHERE status = 'active'),
+	count(*) FILTER (WHERE created_at >= date_trunc('day', now())),
+	COALESCE(sum(cost) FILTER (
+		WHERE created_at >= date_trunc('day', now())
+			AND status <> 'canceled'
+	), 0)::float8,
+	(
+		SELECT count(*)
+		FROM sms_messages m
+		JOIN orders mo ON mo.id = m.order_id
+		WHERE m.created_at >= date_trunc('day', now())
+			AND ($1 = '' OR mo.user_id = NULLIF($1, '')::uuid)
+	)
+FROM orders
+WHERE ($1 = '' OR user_id = NULLIF($1, '')::uuid)`
+
 func (s *Postgres) Dashboard(ctx context.Context, user string) (domain.Dashboard, error) {
 	var d domain.Dashboard
-	err := s.pool.QueryRow(ctx, `SELECT count(*) FILTER(WHERE status='active'),count(*) FILTER(WHERE created_at>=date_trunc('day',now())),COALESCE(sum(cost) FILTER(WHERE created_at>=date_trunc('day',now())),0)::float8,(SELECT count(*) FROM sms_messages m JOIN orders mo ON mo.id=m.order_id WHERE m.created_at>=date_trunc('day',now()) AND ($1='' OR mo.user_id=NULLIF($1,'')::uuid)) FROM orders WHERE ($1='' OR user_id=NULLIF($1,'')::uuid)`, user).Scan(&d.ActiveOrders, &d.TodayOrders, &d.TodayCost, &d.TodaySMS)
+	err := s.pool.QueryRow(ctx, dashboardSQL, user).Scan(&d.ActiveOrders, &d.TodayOrders, &d.TodayCost, &d.TodaySMS)
 	return d, err
 }
 func (s *Postgres) Audit(ctx context.Context, user *string, action, typ, target, ip string, meta json.RawMessage) error {

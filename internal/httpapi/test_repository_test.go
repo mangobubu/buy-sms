@@ -239,7 +239,9 @@ func (r *memoryRepository) Dashboard(_ context.Context, userID string) (domain.D
 			dashboard.ActiveOrders++
 		}
 		dashboard.TodayOrders++
-		dashboard.TodayCost += order.Cost
+		if order.Status != domain.OrderCanceled {
+			dashboard.TodayCost += order.Cost
+		}
 		for _, message := range r.messages {
 			if message.OrderID == order.ID {
 				dashboard.TodaySMS++

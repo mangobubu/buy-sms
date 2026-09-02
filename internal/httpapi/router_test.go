@@ -234,6 +234,38 @@ func TestOperatorDashboardOnlyContainsOwnOrdersAndMessages(t *testing.T) {
 	}
 }
 
+func TestDashboardTodaySpendExcludesCanceledOrders(t *testing.T) {
+	repo := newMemoryRepository()
+	router, _, _ := newTestRouter(t, repo)
+	operator := domain.User{ID: "operator-1", Username: "operator", Role: "operator", Active: true}
+	repo.putSession([]byte("router-test-session-pepper"), "operator-token", operator)
+	now := time.Now().UTC()
+	repo.putOrder(domain.Order{
+		ID: "active-order", UserID: operator.ID, ProviderID: domain.ProviderHeroSMS,
+		Status: domain.OrderActive, Cost: 1.25, Currency: "USD", CreatedAt: now, UpdatedAt: now,
+	})
+	repo.putOrder(domain.Order{
+		ID: "canceled-order", UserID: operator.ID, ProviderID: domain.ProviderHeroSMS,
+		Status: domain.OrderCanceled, Cost: 8.75, Currency: "USD", CreatedAt: now, UpdatedAt: now,
+	})
+
+	response := performAuthenticatedRequest(router, http.MethodGet, "/api/dashboard", "operator-token")
+	if response.Code != http.StatusOK {
+		t.Fatalf("仪表盘状态码=%d，响应=%s", response.Code, response.Body.String())
+	}
+	var dashboard struct {
+		ActiveOrders int    `json:"activeOrders"`
+		TodayOrders  int    `json:"todayOrders"`
+		TodaySpend   string `json:"todaySpend"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.ActiveOrders != 1 || dashboard.TodayOrders != 2 || dashboard.TodaySpend != "1.25" {
+		t.Fatalf("取消号码不应计入今日支出，实际统计: %+v", dashboard)
+	}
+}
+
 func newTestRouter(t *testing.T, repo *memoryRepository) (*gin.Engine, *application.Service, *secure.Vault) {
 	t.Helper()
 	vault, err := secure.NewVault([]byte("router-test-encryption-key-32byte"))
