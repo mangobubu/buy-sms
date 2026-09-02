@@ -3,12 +3,16 @@ SHELL := /bin/sh
 APP_NAME ?= buy-sms
 BIN_DIR ?= bin
 BIN_EXT ?=
+DOCKER ?= docker
 COMPOSE ?= docker compose
+COMPOSE_CMD := $(COMPOSE) --env-file .env
+POSTGRES_VOLUME_NAME ?= $(shell sed -n 's/^POSTGRES_VOLUME_NAME=//p' .env 2>/dev/null | tail -n 1 | tr -d '\r')
+POSTGRES_VOLUME_NAME := $(or $(strip $(POSTGRES_VOLUME_NAME)),buy-sms_postgres-data)
 
 .DEFAULT_GOAL := help
 
 .PHONY: help setup dev-api dev-web frontend-build sync-web build test fmt vet \
-	docker-build docker-up docker-down docker-logs docker-config \
+	docker-volume-create docker-volume-check docker-build docker-up docker-down docker-logs docker-config \
 	docker-build-cn docker-up-cn docker-config-cn
 
 help: ## 显示可用命令
@@ -43,26 +47,35 @@ fmt: ## 格式化 Go 代码
 vet: ## 执行 Go 静态检查
 	go vet ./...
 
+docker-volume-create: ## 首次部署时显式创建 PostgreSQL 外部卷
+	$(DOCKER) volume create "$(POSTGRES_VOLUME_NAME)"
+
+docker-volume-check: ## 只读检查 PostgreSQL 外部卷是否存在
+	@$(DOCKER) volume inspect "$(POSTGRES_VOLUME_NAME)" >/dev/null 2>&1 || { \
+		echo "错误：PostgreSQL 外部卷 $(POSTGRES_VOLUME_NAME) 不存在。已部署环境请停止部署并恢复原卷；仅确认首次部署时执行 make docker-volume-create。" >&2; \
+		exit 1; \
+	}
+
 docker-config: ## 校验国际网络 Compose 配置
-	$(COMPOSE) config --quiet
+	$(COMPOSE_CMD) config --quiet
 
 docker-build: ## 使用国际网络源构建镜像
-	$(COMPOSE) build
+	$(COMPOSE_CMD) build
 
-docker-up: ## 使用国际网络源启动容器
-	$(COMPOSE) up -d --build
+docker-up: docker-volume-check ## 使用国际网络源启动容器
+	$(COMPOSE_CMD) up -d --build
 
 docker-down: ## 停止并移除容器（保留数据库卷）
-	$(COMPOSE) down
+	$(COMPOSE_CMD) down
 
 docker-logs: ## 查看应用容器日志
-	$(COMPOSE) logs -f app
+	$(COMPOSE_CMD) logs -f app
 
 docker-config-cn: ## 校验中国大陆镜像源 Compose 配置
-	$(COMPOSE) -f docker-compose.yml -f docker-compose.cn.yml config --quiet
+	$(COMPOSE_CMD) -f docker-compose.yml -f docker-compose.cn.yml config --quiet
 
 docker-build-cn: ## 使用中国大陆镜像源构建镜像
-	$(COMPOSE) -f docker-compose.yml -f docker-compose.cn.yml build
+	$(COMPOSE_CMD) -f docker-compose.yml -f docker-compose.cn.yml build
 
-docker-up-cn: ## 使用中国大陆镜像源启动容器
-	$(COMPOSE) -f docker-compose.yml -f docker-compose.cn.yml up -d --build
+docker-up-cn: docker-volume-check ## 使用中国大陆镜像源启动容器
+	$(COMPOSE_CMD) -f docker-compose.yml -f docker-compose.cn.yml up -d --build

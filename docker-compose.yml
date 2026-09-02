@@ -84,6 +84,8 @@ services:
 
 volumes:
   postgres-data:
+    name: ${POSTGRES_VOLUME_NAME:-buy-sms_postgres-data}
+    external: true
 
 networks:
   internal:

@@ -685,7 +685,15 @@ func (s *Service) Webhook(ctx context.Context, pid, token string, payload, heade
 	}
 	o, err := s.repo.FindOrderByUpstream(ctx, pid, upstream)
 	if err != nil {
-		return fmt.Errorf("webhook order pending: %w", ErrProvider)
+		if errors.Is(err, store.ErrNotFound) {
+			w.Status = "ignored"
+			w.Error = "order_not_found"
+			if _, saveErr := s.repo.SaveWebhookEvent(ctx, w); saveErr != nil {
+				return fmt.Errorf("save unknown webhook event: %w", saveErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("find webhook order: %w", err)
 	}
 	if o.Terminal() {
 		w.Status = "ignored"

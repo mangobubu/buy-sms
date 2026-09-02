@@ -611,21 +611,30 @@ func (s *Postgres) Audit(ctx context.Context, user *string, action, typ, target,
 	_, err := s.pool.Exec(ctx, `INSERT INTO audit_logs(user_id,action,target_type,target_id,ip,metadata) VALUES($1,$2,$3,$4,NULLIF($5,'')::inet,$6)`, user, action, typ, target, ip, meta)
 	return err
 }
+
+type maintenanceStatement struct {
+	query  string
+	cutoff time.Time
+}
+
+func maintenanceStatements(now time.Time) []maintenanceStatement {
+	return []maintenanceStatement{
+		{`DELETE FROM captcha_challenges WHERE expires_at<$1`, now.Add(-time.Hour)},
+		{`DELETE FROM captcha_issuances WHERE issued_at<$1`, now.Add(-24 * time.Hour)},
+		{`DELETE FROM auth_sessions WHERE expires_at<$1 OR revoked_at<$1`, now.Add(-7 * 24 * time.Hour)},
+		{`DELETE FROM login_attempts WHERE attempted_at<$1`, now.Add(-7 * 24 * time.Hour)},
+		{`DELETE FROM webhook_events WHERE received_at<$1`, now.Add(-90 * 24 * time.Hour)},
+	}
+}
+
 func (s *Postgres) Maintenance(ctx context.Context, now time.Time) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	statements := []string{
-		`DELETE FROM captcha_challenges WHERE expires_at<$1-interval '1 hour'`,
-		`DELETE FROM captcha_issuances WHERE issued_at<$1-interval '1 day'`,
-		`DELETE FROM auth_sessions WHERE expires_at<$1-interval '7 days' OR revoked_at<$1-interval '7 days'`,
-		`DELETE FROM login_attempts WHERE attempted_at<$1-interval '7 days'`,
-		`DELETE FROM webhook_events WHERE received_at<$1-interval '90 days'`,
-	}
-	for _, statement := range statements {
-		if _, err = tx.Exec(ctx, statement, now); err != nil {
+	for _, statement := range maintenanceStatements(now) {
+		if _, err = tx.Exec(ctx, statement.query, statement.cutoff); err != nil {
 			return err
 		}
 	}
