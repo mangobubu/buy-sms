@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -89,6 +90,46 @@ func (r *terminalLockRepository) snapshot() (domain.Order, []string, int, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.order, append([]string(nil), r.transitions...), r.audits, r.lockCalls
+}
+
+func TestFinishOrderRejectsCancelAfterReceivingMessage(t *testing.T) {
+	var providerRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		providerRequests.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	vault, _ := secure.NewVault([]byte("cancel-after-message-key"))
+	apiKey, _ := vault.Encrypt("provider-secret")
+	repo := &terminalLockRepository{
+		provider: domain.Provider{ID: domain.ProviderHeroSMS, BaseURL: server.URL + "/api/v1", APIKeyCipher: apiKey},
+		order: domain.Order{
+			ID: "received-message", UserID: "operator-1", ProviderID: domain.ProviderHeroSMS,
+			UpstreamID: "received-message-upstream", Status: domain.OrderActive,
+			Messages: []domain.SMSMessage{{ID: "message-1", Code: "123456"}},
+		},
+	}
+	service := New(repo, nil, vault, config.Config{})
+
+	_, err := service.FinishOrder(context.Background(), repo.order.ID, "cancel", domain.User{ID: "operator-1", Role: "operator"}, "127.0.0.1")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("已有验证码时取消应返回 ErrConflict，实际为: %v", err)
+	}
+
+	order, transitions, audits, lockCalls := repo.snapshot()
+	if providerRequests.Load() != 0 {
+		t.Fatalf("已有验证码时不应请求供应商，实际请求次数: %d", providerRequests.Load())
+	}
+	if order.Status != domain.OrderActive {
+		t.Fatalf("取消被拒绝后订单应保持 active，实际状态: %s", order.Status)
+	}
+	if len(transitions) != 0 || audits != 0 {
+		t.Fatalf("取消被拒绝后不应产生状态变更或审计: transitions=%v audits=%d", transitions, audits)
+	}
+	if lockCalls != 1 {
+		t.Fatalf("取消检查应在订单锁内执行一次，实际锁调用次数: %d", lockCalls)
+	}
 }
 
 func TestPollLocalExpiryAndFinishOrderShareTerminalLock(t *testing.T) {

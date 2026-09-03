@@ -955,6 +955,9 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 		if o.Terminal() {
 			return ErrConflict
 		}
+		if action == "cancel" && len(o.Messages) > 0 {
+			return ErrConflict
+		}
 		p, key, client, err := s.providerClient(lockCtx, o.ProviderID)
 		if err != nil {
 			return err

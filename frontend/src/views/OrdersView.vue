@@ -148,6 +148,10 @@ function isLive(order: NumberOrder): boolean {
   return !terminalStatuses.has(order.status.toLowerCase())
 }
 
+function canCancel(order: NumberOrder): boolean {
+  return isLive(order) && !order.messages?.length
+}
+
 function toggleMobileOrder(id: string): void {
   expandedOrders.value = expandedOrders.value.includes(id)
     ? expandedOrders.value.filter((item) => item !== id)
@@ -316,7 +320,7 @@ onBeforeUnmount(() => {
               <el-button link type="success" :loading="actionOrderId === scope.row.id" @click="completeOrder(scope.row)">
                 完成
               </el-button>
-              <el-button link type="danger" :disabled="Boolean(actionOrderId)" @click="cancelOrder(scope.row)">取消</el-button>
+              <el-button v-if="canCancel(scope.row)" link type="danger" :disabled="Boolean(actionOrderId)" @click="cancelOrder(scope.row)">取消</el-button>
             </div>
             <span v-else class="muted-text">已结束</span>
           </template>
@@ -340,7 +344,7 @@ onBeforeUnmount(() => {
         <div class="mobile-number-actions">
           <CopyButton v-if="order.phoneNumber" :value="order.phoneNumber" label="号码">复制号码</CopyButton>
           <el-button v-if="isLive(order)" link type="success" :icon="CircleCheck" @click="completeOrder(order)">完成</el-button>
-          <el-button v-if="isLive(order)" link type="danger" :icon="Close" @click="cancelOrder(order)">取消</el-button>
+          <el-button v-if="canCancel(order)" link type="danger" :icon="Close" @click="cancelOrder(order)">取消</el-button>
           <el-button link @click="toggleMobileOrder(order.id)">{{ expandedOrders.includes(order.id) ? '收起短信' : '查看短信' }}</el-button>
         </div>
         <div v-if="expandedOrders.includes(order.id)" class="mobile-sms-list">
