@@ -95,6 +95,10 @@ func (c *HeroSMS) Purchase(ctx context.Context, apiKey string, request PurchaseR
 	if strings.TrimSpace(request.QualityTier) != "" {
 		return PurchaseResult{}, ErrInvalidRequest
 	}
+	if request.MaxPrice != nil && request.FixedPrice == nil {
+		fixedPrice := true
+		request.FixedPrice = &fixedPrice
+	}
 	if !c.native {
 		return c.legacy.Purchase(ctx, apiKey, request)
 	}

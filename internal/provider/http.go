@@ -173,7 +173,7 @@ func safeCodeFromBody(payload []byte, secrets ...string) string {
 	decoder.UseNumber()
 	if decoder.Decode(&value) == nil {
 		if object, ok := value.(map[string]any); ok {
-			for _, key := range []string{"code", "type", "error", "status"} {
+			for _, key := range []string{"code", "type", "error", "title", "status"} {
 				if raw, found := lookup(object, key); found {
 					if code := sanitizeCodeWithoutSecrets(stringValue(raw), secrets...); code != "" {
 						return code

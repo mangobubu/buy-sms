@@ -585,6 +585,46 @@ func TestPurchaseClassifiesDeterministicProviderErrors(t *testing.T) {
 	}
 }
 
+func TestPurchaseClassifiesHeroSMSProblemTitleAsDeterministicFailure(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upstreamCalls.Add(1)
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("HeroSMS 购买请求不是有效 JSON: %v", err)
+		}
+		if body["maxPrice"] != 0.09 || body["fixedPrice"] != true {
+			t.Errorf("HeroSMS 未按用户选择的档位精确购买: %#v", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = writer.Write([]byte(`{"title":"WRONG_MAX_PRICE","details":"The maximum price is less than the permitted price","info":{"min":0.108}}`))
+	}))
+	t.Cleanup(server.Close)
+
+	vault, _ := secure.NewVault([]byte("purchase-herosms-problem-title-key"))
+	apiKey, _ := vault.Encrypt("provider-secret")
+	repo := newPurchaseRepository(domain.Provider{
+		ID: domain.ProviderHeroSMS, BaseURL: server.URL + "/api/v1", APIKeyCipher: apiKey, Enabled: true,
+	})
+	service := New(repo, nil, vault, config.Config{})
+	user := domain.User{ID: "operator-herosms-problem-title", Role: "operator"}
+	const key = "idem-herosms-title-123456"
+
+	_, callErr := service.Purchase(context.Background(), purchaseInput("0.09", key), user, "127.0.0.1")
+	requirePurchaseError(t, callErr, "price_exceeded", "供应商实际价格超过所选价格，购买已取消")
+	record, code, orders, _, completes := repo.snapshot(user.ID, key)
+	if record.Status != "failed" || record.ErrorCode != "price_exceeded" || code != "price_exceeded" || orders != 0 || completes != 0 {
+		t.Fatalf("HeroSMS 明确拒单被误判: record=%+v code=%q orders=%d completes=%d", record, code, orders, completes)
+	}
+
+	_, retryErr := service.Purchase(context.Background(), purchaseInput("0.09", key), user, "127.0.0.1")
+	requirePurchaseError(t, retryErr, "price_exceeded", "供应商实际价格超过所选价格，购买已取消")
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("HeroSMS 明确拒单重放不应再次调用供应商，实际=%d", upstreamCalls.Load())
+	}
+}
+
 func TestPurchaseKeepsHTTPServerErrorsUnknownEvenWithBusinessCode(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

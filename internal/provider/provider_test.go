@@ -33,7 +33,7 @@ func TestHeroSMSNativeLifecycleAndFullOTPHistory(t *testing.T) {
 				http.Error(writer, `{"code":"BAD_REQUEST"}`, http.StatusBadRequest)
 				return
 			}
-			_, _ = writer.Write([]byte(`{"data":{"tg":{"2":{"prices":{"default":0.14,"retail":0.17,"min":0.11},"counts":{"total":7,"physical":5}}}}}`))
+			_, _ = writer.Write([]byte(`{"data":{"tg":{"2":{"prices":{"default":0.108,"retail":0.17,"min":0.108},"counts":{"total":2386,"defaultPrice":460,"physical":1820},"map":{"0.0957":106,"0.1055":460,"0.108":460,"0.1576":1360,"0.20":0}}}}}`))
 		case "/api/v1/activations":
 			assertHeader(t, request, "Authorization", "ApiKey "+testAPIKey)
 			if request.Method != http.MethodPost {
@@ -79,7 +79,9 @@ func TestHeroSMSNativeLifecycleAndFullOTPHistory(t *testing.T) {
 		t.Fatalf("国家目录解析错误: items=%#v err=%v", countries, err)
 	}
 	prices, err := client.Catalog(context.Background(), testAPIKey, CatalogRequest{Kind: CatalogPrice, Country: "2", Service: "tg"})
-	if err != nil || len(prices) != 1 || prices[0].Code != "tg" || prices[0].Country != "2" || prices[0].Price == nil || *prices[0].Price != 0.14 || prices[0].Stock == nil || *prices[0].Stock != 7 {
+	if err != nil || len(prices) != 1 || prices[0].Code != "tg" || prices[0].Country != "2" || prices[0].Price == nil || *prices[0].Price != 0.108 || prices[0].Stock == nil || *prices[0].Stock != 460 ||
+		len(prices[0].PriceOptions) != 2 || prices[0].PriceOptions[0].Price != 0.108 || prices[0].PriceOptions[0].Available != 460 ||
+		prices[0].PriceOptions[1].Price != 0.1576 || prices[0].PriceOptions[1].Available != 1360 {
 		t.Fatalf("HeroSMS 原生报价解析错误: items=%#v err=%v", prices, err)
 	}
 	fixedPrice := true

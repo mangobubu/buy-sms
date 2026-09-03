@@ -163,12 +163,15 @@ const priceOptions = computed(() => {
     const options = currentQuote.priceOptions?.length
       ? currentQuote.priceOptions
       : [{ price: currentQuote.price, available: currentQuote.available }]
-    return options.map<DisplayPriceOption>((option) => ({
-      ...option,
-      key: priceOptionKey(currentQuote.tier, option.price),
-      currency: currentQuote.currency || 'USD',
-      tier: currentQuote.tier,
-    }))
+    return options
+      .filter((option) => Number.isFinite(Number(option.price)) && Number(option.price) > 0 && option.available > 0)
+      .sort((left, right) => Number(left.price) - Number(right.price))
+      .map<DisplayPriceOption>((option) => ({
+        ...option,
+        key: priceOptionKey(currentQuote.tier, option.price),
+        currency: currentQuote.currency || 'USD',
+        tier: currentQuote.tier,
+      }))
   })
 })
 const selectedPriceOption = computed(() =>
@@ -880,6 +883,9 @@ onBeforeUnmount(() => {
             </el-select>
             <p v-if="form.provider === 'smsbower'" class="form-help">
               Bronze、Silver、Gold 等级已包含在价格选项中，可用数量随价格档位变化。
+            </p>
+            <p v-else-if="form.provider === 'herosms'" class="form-help">
+              仅显示当前 HeroSMS 账号有权限购买且仍有库存的报价档位，请按需选择。
             </p>
             <p v-else class="form-help">请选择要购买的价格，可用数量随价格档位变化。</p>
           </el-form-item>

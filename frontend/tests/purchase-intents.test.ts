@@ -11,6 +11,12 @@ import {
   type PurchaseIntentLockManager,
   type PurchaseIntentStorage,
 } from '../src/utils/purchase-intents.ts'
+import { formatMoney } from '../src/utils/format.ts'
+
+test('金额格式保留 HeroSMS 的四位报价精度', () => {
+  assert.match(formatMoney('0.0957', 'USD'), /0\.0957/)
+  assert.match(formatMoney('1', 'USD'), /1\.00$/)
+})
 
 class MemoryStorage implements PurchaseIntentStorage {
   private readonly items = new Map<string, string>()

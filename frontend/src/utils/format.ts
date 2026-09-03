@@ -1,4 +1,4 @@
-import type { ProviderCode } from '@/types/api'
+import type { ProviderCode } from '../types/api'
 
 export const providerNames: Record<ProviderCode, string> = {
   herosms: 'HeroSMS',
@@ -32,9 +32,12 @@ export function formatMoney(value?: string | number, currency = 'USD'): string {
       style: 'currency',
       currency,
       minimumFractionDigits: 2,
+      maximumFractionDigits: 4,
     }).format(amount)
   } catch {
-    return `${amount.toFixed(2)} ${currency}`
+    const [integer, fraction = ''] = amount.toFixed(4).split('.')
+    const preciseFraction = fraction.replace(/0+$/, '').padEnd(2, '0')
+    return `${integer}.${preciseFraction} ${currency}`
   }
 }
 

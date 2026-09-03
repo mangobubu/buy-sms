@@ -3,7 +3,9 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"buysms/internal/domain"
@@ -164,8 +166,13 @@ func parsePriceCatalog(payload []byte, providerID, fallbackCountry, fallbackServ
 }
 
 func priceItemFromMap(object map[string]any, route []string, providerID, fallbackCountry, fallbackService string) (domain.CatalogItem, bool) {
-	// HeroSMS 原生 offers 的层级是 data[service][country]，价格和库存又分别
-	// 位于 prices/counts 对象中。
+	if providerID == domain.ProviderHeroSMS {
+		if _, nativeOffer := lookup(object, "prices"); nativeOffer {
+			return heroSMSPriceItemFromMap(object, route, fallbackCountry, fallbackService)
+		}
+	}
+
+	// 兼容其他供应商将汇总价格和库存放在 prices/counts 中的响应。
 	if rawPrices, found := lookup(object, "prices"); found {
 		prices, pricesOK := rawPrices.(map[string]any)
 		rawCounts, _ := lookup(object, "counts")
@@ -245,6 +252,111 @@ func priceItemFromMap(object map[string]any, route []string, providerID, fallbac
 		item.Stock = &value
 	}
 	return item, true
+}
+
+func heroSMSPriceItemFromMap(object map[string]any, route []string, fallbackCountry, fallbackService string) (domain.CatalogItem, bool) {
+	rawPrices, pricesFound := lookup(object, "prices")
+	prices, pricesOK := rawPrices.(map[string]any)
+	if !pricesFound || !pricesOK {
+		return domain.CatalogItem{}, false
+	}
+	priceMap := make(map[string]any)
+	if rawPriceMap, found := lookup(object, "map"); found {
+		var priceMapOK bool
+		priceMap, priceMapOK = rawPriceMap.(map[string]any)
+		if !priceMapOK {
+			return domain.CatalogItem{}, false
+		}
+	}
+
+	minimum, hasMinimum := heroSMSMinimumPrice(prices)
+	if !hasMinimum {
+		return domain.CatalogItem{}, false
+	}
+
+	byPrice := make(map[float64]int)
+	for rawPrice, rawAvailable := range priceMap {
+		price, err := strconv.ParseFloat(strings.TrimSpace(rawPrice), 64)
+		available, availableOK := positiveInteger(rawAvailable)
+		if err != nil || price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) || !availableOK {
+			continue
+		}
+		if price < minimum {
+			continue
+		}
+		if current := byPrice[price]; available <= int(^uint(0)>>1)-current {
+			byPrice[price] = current + available
+		}
+	}
+
+	options := make([]domain.CatalogPriceOption, 0, len(byPrice))
+	for price, available := range byPrice {
+		options = append(options, domain.CatalogPriceOption{Price: price, Available: available})
+	}
+	sort.Slice(options, func(i, j int) bool { return options[i].Price < options[j].Price })
+
+	if len(options) == 0 {
+		defaultPrice, hasDefaultPrice := firstFloat(prices, "default")
+		rawCounts, _ := lookup(object, "counts")
+		counts, _ := rawCounts.(map[string]any)
+		rawDefaultAvailable, defaultAvailableFound := lookup(counts, "defaultPrice")
+		defaultAvailable, hasDefaultAvailable := positiveInteger(rawDefaultAvailable)
+		if !hasDefaultPrice || defaultPrice <= 0 || math.IsNaN(defaultPrice) || math.IsInf(defaultPrice, 0) ||
+			!defaultAvailableFound || !hasDefaultAvailable || defaultPrice < minimum {
+			return domain.CatalogItem{}, false
+		}
+		options = append(options, domain.CatalogPriceOption{Price: defaultPrice, Available: defaultAvailable})
+	}
+
+	service := strings.TrimSpace(fallbackService)
+	country := strings.TrimSpace(fallbackCountry)
+	if service == "" && len(route) > 0 {
+		service = route[0]
+	}
+	if country == "" && len(route) > 1 {
+		country = route[1]
+	}
+	if service == "" {
+		return domain.CatalogItem{}, false
+	}
+
+	price := options[0].Price
+	stock := options[0].Available
+	return domain.CatalogItem{
+		ProviderID:   domain.ProviderHeroSMS,
+		Kind:         CatalogPrice,
+		Code:         service,
+		Country:      country,
+		Name:         service,
+		Price:        &price,
+		Stock:        &stock,
+		PriceOptions: options,
+		Raw:          rawJSON(object),
+	}, true
+}
+
+func heroSMSMinimumPrice(prices map[string]any) (float64, bool) {
+	rawMinimum, found := lookup(prices, "min")
+	if !found {
+		rawMinimum, found = lookup(prices, "default")
+	}
+	if !found {
+		return 0, false
+	}
+	minimum, ok := floatValue(rawMinimum)
+	if !ok || minimum <= 0 || math.IsNaN(minimum) || math.IsInf(minimum, 0) {
+		return 0, false
+	}
+	return minimum, true
+}
+
+func positiveInteger(value any) (int, bool) {
+	number, ok := floatValue(value)
+	maxInt := int(^uint(0) >> 1)
+	if !ok || number <= 0 || math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number > float64(maxInt) {
+		return 0, false
+	}
+	return int(number), true
 }
 
 func firstScalar(object map[string]any, keys ...string) string {
