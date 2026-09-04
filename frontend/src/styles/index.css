@@ -9,7 +9,10 @@
   --brand-soft: #eef3ff;
   --ink: #172033;
   --ink-soft: #5f6b7d;
-  --muted: #8a94a6;
+  --muted: #667085;
+  --caption-text: #667085;
+  --caption-text-strong: #526174;
+  --caption-text-on-dark: #b7c3d5;
   --line: #e6eaf1;
   --surface: #ffffff;
   --surface-soft: #f8fafc;
@@ -31,7 +34,9 @@
   --el-fill-color-light: #f6f8fb;
   --el-text-color-primary: #172033;
   --el-text-color-regular: #4d596d;
-  --el-text-color-secondary: #798398;
+  --el-text-color-secondary: #667085;
+  --el-text-color-placeholder: #667085;
+  --el-disabled-text-color: #667085;
 }
 
 * {
@@ -2504,4 +2509,184 @@ code {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* 小尺寸辅助文字：保留足够字号和对比度，避免浅灰文字在高分屏下发虚。 */
+.content-area small {
+  font-size: 12px !important;
+  line-height: 1.45 !important;
+}
+
+/* 应用壳、登录页和内容区中原本低于 12px 的可读文字统一提升。 */
+:is(
+  .brand-copy span,
+  .menu-group-label,
+  .topbar-caption,
+  .user-copy small,
+  .eyebrow,
+  .intro-features span,
+  .intro-foot,
+  .captcha-image span,
+  .login-security-note,
+  .stat-copy > span,
+  .stat-copy small,
+  .stat-copy p,
+  .card-header p,
+  .recent-order-main small,
+  .stacked-cell small,
+  .health-copy small,
+  .user-cell small,
+  .recent-order-time,
+  .date-cell,
+  .recent-order-timing time,
+  .message-count,
+  .health-summary,
+  .provider-count,
+  .health-balance strong,
+  .health-balance small,
+  .card-footer-link,
+  .quick-actions p,
+  .step-heading p,
+  .security-card-heading p,
+  .provider-option strong,
+  .provider-option small,
+  .form-help,
+  .summary-visual small,
+  .summary-list dt,
+  .summary-list dd,
+  .receive-notice strong,
+  .receive-notice span,
+  .purchase-form-actions p,
+  .orders-section-heading p,
+  .live-indicator,
+  .refresh-time,
+  .phone-cell small,
+  .message-cell span,
+  .money-cell,
+  .muted-text,
+  .order-countdown,
+  .order-countdown strong,
+  .cancel-hint,
+  .renewal-target small,
+  .receive-state strong,
+  .receive-state small,
+  .sms-code-row time,
+  .sms-body > p,
+  .waiting-pulse,
+  .provider-card-title small,
+  .input-suffix,
+  .webhook-box strong,
+  .webhook-box code,
+  .provider-card-footer > span,
+  .user-status,
+  .password-advice li,
+  .mobile-order-card > header small,
+  .mobile-order-meta,
+  .mobile-order-countdown,
+  .mobile-cancel-hint,
+  .mobile-sms-item time,
+  .mobile-sms-item p
+) {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 浅色区域的辅助信息使用满足普通文字对比度要求的中性灰。 */
+:is(
+  .topbar-caption,
+  .user-copy small,
+  .login-security-note,
+  .stat-copy > span,
+  .stat-copy small,
+  .stat-copy p,
+  .card-header p,
+  .recent-order-main small,
+  .stacked-cell small,
+  .health-copy small,
+  .user-cell small,
+  .recent-order-time,
+  .date-cell,
+  .recent-order-timing time,
+  .message-count,
+  .health-summary,
+  .provider-count,
+  .health-balance small,
+  .card-footer-link,
+  .step-heading p,
+  .security-card-heading p,
+  .provider-option small,
+  .form-help,
+  .summary-visual small,
+  .summary-list dt,
+  .purchase-form-actions p,
+  .orders-section-heading p,
+  .refresh-time,
+  .phone-cell small,
+  .message-cell span,
+  .muted-text,
+  .cancel-hint,
+  .renewal-target small,
+  .sms-code-row time,
+  .sms-body > p,
+  .waiting-pulse,
+  .provider-card-title small,
+  .input-suffix,
+  .webhook-box strong,
+  .webhook-box code,
+  .provider-card-footer > span,
+  .user-status,
+  .mobile-order-card > header small,
+  .mobile-order-meta,
+  .mobile-order-countdown,
+  .mobile-cancel-hint,
+  .mobile-sms-item time,
+  .mobile-sms-item p
+) {
+  color: var(--caption-text);
+}
+
+.el-select-dropdown__item small {
+  color: var(--caption-text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 保留状态色语义，同时加深原先偏浅的绿色辅助文字。 */
+:is(.receive-notice span, .receive-state small) {
+  color: #4f7568;
+}
+
+.receive-state.finished strong,
+.receive-state.finished small,
+.live-indicator.idle {
+  color: var(--caption-text);
+}
+
+.provider-option.disabled {
+  opacity: 1;
+}
+
+.provider-option.disabled :is(strong, small) {
+  color: var(--caption-text);
+}
+
+.order-countdown:is(.is-expired, .is-confirming, .is-ended, .is-unknown),
+.order-countdown:is(.is-expired, .is-confirming, .is-ended, .is-unknown) :is(.el-icon, strong) {
+  color: var(--caption-text);
+}
+
+/* 深色表面使用更亮的灰蓝色，避免与浅色页面共用同一灰阶。 */
+:is(
+  .brand-copy span,
+  .menu-group-label,
+  .intro-features span,
+  .intro-foot,
+  .quick-actions p,
+  .password-advice li
+) {
+  color: var(--caption-text-on-dark);
+}
+
+.captcha-image span {
+  color: var(--caption-text-strong);
 }
