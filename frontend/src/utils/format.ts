@@ -57,24 +57,45 @@ const twoDigitCallingCodes = new Set([
   '81', '82', '84', '86', '90', '91', '92', '93', '94', '95', '98',
 ])
 
-export function formatPhoneNumber(phone?: string): string {
-  if (!phone) return '号码分配中'
+export interface PhoneNumberParts {
+  callingCode: string
+  localNumber: string
+  formattedLocalNumber: string
+  fullNumber: string
+}
+
+export function getPhoneNumberParts(phone?: string): PhoneNumberParts | null {
+  if (!phone) return null
 
   const trimmed = phone.trim()
   let digits = trimmed.replace(/\D/g, '')
-  if (!digits) return trimmed || '号码分配中'
-  if (trimmed.startsWith('00')) digits = digits.slice(2)
-  if (!digits) return trimmed || '号码分配中'
+  if (digits.startsWith('00')) digits = digits.slice(2)
+  if (!digits) return null
 
   const callingCodeLength = singleDigitCallingCodes.has(digits.charAt(0))
     ? 1
     : twoDigitCallingCodes.has(digits.slice(0, 2))
       ? 2
       : Math.min(3, digits.length)
-  const callingCode = digits.slice(0, callingCodeLength)
-  const localGroups = digits.slice(callingCodeLength).match(/.{1,3}/g) ?? []
+  const callingCodeDigits = digits.slice(0, callingCodeLength)
+  const localNumber = digits.slice(callingCodeLength)
 
-  return [`+${callingCode}`, ...localGroups].join(' ')
+  return {
+    callingCode: `+${callingCodeDigits}`,
+    localNumber,
+    formattedLocalNumber: localNumber.match(/.{1,3}/g)?.join(' ') ?? '',
+    fullNumber: `+${digits}`,
+  }
+}
+
+export function formatPhoneNumber(phone?: string): string {
+  if (!phone) return '号码分配中'
+
+  const trimmed = phone.trim()
+  const parts = getPhoneNumberParts(phone)
+  if (!parts) return trimmed || '号码分配中'
+
+  return [parts.callingCode, parts.formattedLocalNumber].filter(Boolean).join(' ')
 }
 
 export function maskPhone(phone?: string): string {

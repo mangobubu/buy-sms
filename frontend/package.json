@@ -7,7 +7,7 @@
     "dev": "vite --configLoader runner",
     "build": "npm run typecheck && vite build --configLoader runner",
     "preview": "vite preview --configLoader runner",
-    "test": "node --test tests/purchase-intents.test.ts tests/countdown.test.ts tests/cancel-policy.test.ts tests/renewal-policy.test.ts tests/renewal-intents.test.ts",
+    "test": "node --test tests/purchase-intents.test.ts tests/countdown.test.ts tests/cancel-policy.test.ts tests/renewal-policy.test.ts tests/renewal-intents.test.ts tests/phone-number.test.ts",
     "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json"
   },
   "dependencies": {

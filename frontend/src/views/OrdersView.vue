@@ -7,11 +7,12 @@ import CopyButton from '@/components/CopyButton.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import OrderCountdown from '@/components/OrderCountdown.vue'
 import OrderStatusTag from '@/components/OrderStatusTag.vue'
+import PhoneNumberCopy from '@/components/PhoneNumberCopy.vue'
 import { ordersApi } from '@/api/orders'
 import { errorMessage } from '@/api/http'
 import type { NumberOrder, OrderQuery, PageResult, RenewalOption, RenewalOptions } from '@/types/api'
 import { presentCancelPolicy, type CancelPresentation } from '@/utils/cancel-policy'
-import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, providerName } from '@/utils/format'
+import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, getPhoneNumberParts, providerName } from '@/utils/format'
 import { isTerminalOrderStatus } from '@/utils/countdown'
 import { formatRenewalDuration, isRenewalCandidate, renewalOptionKey } from '@/utils/renewal-policy'
 import {
@@ -519,8 +520,8 @@ onBeforeUnmount(() => {
           <template #default="scope">
             <div class="phone-cell">
               <span class="phone-icon"><Cellphone /></span>
-              <span><strong>{{ formatPhoneNumber(scope.row.phoneNumber) }}</strong><small>{{ scope.row.countryName || '国家代码：' + scope.row.countryCode }}</small></span>
-              <CopyButton v-if="scope.row.phoneNumber" :value="scope.row.phoneNumber" label="号码" />
+              <span><PhoneNumberCopy :value="scope.row.phoneNumber" /><small>{{ scope.row.countryName || '国家代码：' + scope.row.countryCode }}</small></span>
+              <CopyButton v-if="getPhoneNumberParts(scope.row.phoneNumber)" :value="getPhoneNumberParts(scope.row.phoneNumber)?.fullNumber" label="完整号码" />
             </div>
           </template>
         </el-table-column>
@@ -606,7 +607,7 @@ onBeforeUnmount(() => {
         <header @click="toggleMobileOrder(order.id)">
           <span class="phone-icon"><Cellphone /></span>
           <div>
-            <strong>{{ formatPhoneNumber(order.phoneNumber) }}</strong>
+            <PhoneNumberCopy :value="order.phoneNumber" />
             <small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small>
             <small v-if="order.provider === 'herosms'">时长：{{ formatPurchaseDuration(order.duration) }}</small>
           </div>
@@ -622,7 +623,7 @@ onBeforeUnmount(() => {
           <span>{{ order.messages?.length || 0 }} 条短信</span>
         </div>
         <div class="mobile-number-actions">
-          <CopyButton v-if="order.phoneNumber" :value="order.phoneNumber" label="号码">复制号码</CopyButton>
+          <CopyButton v-if="getPhoneNumberParts(order.phoneNumber)" :value="getPhoneNumberParts(order.phoneNumber)?.fullNumber" label="完整号码">复制号码</CopyButton>
           <el-button
             v-if="isLive(order) && !order.renewalPending"
             link
