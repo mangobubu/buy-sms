@@ -52,22 +52,30 @@ type SMSDTO struct {
 	ReceivedAt time.Time `json:"receivedAt"`
 }
 type OrderDTO struct {
-	ID             string    `json:"id"`
-	Provider       string    `json:"provider"`
-	ProviderName   string    `json:"providerName,omitempty"`
-	PhoneNumber    string    `json:"phoneNumber"`
-	CountryCode    string    `json:"countryCode"`
-	CountryName    string    `json:"countryName,omitempty"`
-	ServiceCode    string    `json:"serviceCode"`
-	ServiceName    string    `json:"serviceName,omitempty"`
-	QualityTier    string    `json:"tier,omitempty"`
-	Status         string    `json:"status"`
-	Price          string    `json:"price"`
-	Currency       string    `json:"currency"`
-	Messages       []SMSDTO  `json:"messages"`
-	WebhookEnabled bool      `json:"webhookEnabled"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID                           string     `json:"id"`
+	Provider                     string     `json:"provider"`
+	ProviderName                 string     `json:"providerName,omitempty"`
+	PhoneNumber                  string     `json:"phoneNumber"`
+	CountryCode                  string     `json:"countryCode"`
+	CountryName                  string     `json:"countryName,omitempty"`
+	ServiceCode                  string     `json:"serviceCode"`
+	ServiceName                  string     `json:"serviceName,omitempty"`
+	QualityTier                  string     `json:"tier,omitempty"`
+	Duration                     string     `json:"duration,omitempty"`
+	Status                       string     `json:"status"`
+	Price                        string     `json:"price"`
+	Currency                     string     `json:"currency"`
+	Messages                     []SMSDTO   `json:"messages"`
+	CurrentActivationHasMessages bool       `json:"currentActivationHasMessages"`
+	RenewalPending               bool       `json:"renewalPending,omitempty"`
+	WebhookEnabled               bool       `json:"webhookEnabled"`
+	ExpiresAt                    *time.Time `json:"expiresAt,omitempty"`
+	CanCancel                    bool       `json:"canCancel"`
+	CancelAvailableAt            *time.Time `json:"cancelAvailableAt,omitempty"`
+	CancelWaitSeconds            *int       `json:"cancelWaitSeconds,omitempty"`
+	CancelUnavailableReason      string     `json:"cancelUnavailableReason,omitempty"`
+	CreatedAt                    time.Time  `json:"createdAt"`
+	UpdatedAt                    time.Time  `json:"updatedAt"`
 }
 
 type PurchaseInput struct {
@@ -75,6 +83,7 @@ type PurchaseInput struct {
 	CountryCode    string `json:"countryCode"`
 	ServiceCode    string `json:"serviceCode"`
 	QualityTier    string `json:"tier"`
+	Duration       string `json:"duration"`
 	MaxPrice       string `json:"maxPrice"`
 	IdempotencyKey string `json:"-"`
 }
@@ -86,6 +95,7 @@ type PurchaseAttemptDTO struct {
 	ServiceCode string    `json:"serviceCode"`
 	ServiceName string    `json:"serviceName,omitempty"`
 	QualityTier string    `json:"tier,omitempty"`
+	Duration    string    `json:"duration,omitempty"`
 	MaxPrice    string    `json:"maxPrice"`
 	Status      string    `json:"status"`
 	ErrorCode   string    `json:"errorCode"`
@@ -136,6 +146,34 @@ type QuoteDTO struct {
 	PriceOptions []QuotePriceOptionDTO `json:"priceOptions,omitempty"`
 }
 
+type DurationOptionDTO struct {
+	Value        string                `json:"value"`
+	Minutes      int                   `json:"minutes"`
+	Hours        int                   `json:"hours,omitempty"`
+	Price        string                `json:"price"`
+	Available    int                   `json:"available"`
+	PriceOptions []QuotePriceOptionDTO `json:"priceOptions,omitempty"`
+}
+
+type RenewalOptionDTO struct {
+	Value    int    `json:"value"`
+	Unit     string `json:"unit"`
+	Minutes  int    `json:"minutes"`
+	Price    string `json:"price"`
+	Currency string `json:"currency"`
+}
+
+type RenewalOptionsDTO struct {
+	Mode    string             `json:"mode"`
+	Options []RenewalOptionDTO `json:"options"`
+}
+
+type RenewalInput struct {
+	Value          int    `json:"value"`
+	Unit           string `json:"unit"`
+	QuotedPrice    string `json:"quotedPrice"`
+	IdempotencyKey string `json:"-"`
+}
 type ProviderHealthDTO struct {
 	Code          string     `json:"code"`
 	Name          string     `json:"name"`
@@ -175,7 +213,7 @@ type SaveUserInput struct {
 	Password    string `json:"password"`
 }
 
-func OrderView(o domain.Order, webhook bool) OrderDTO {
+func OrderView(o domain.Order, webhook bool, now time.Time) OrderDTO {
 	status := o.Status
 	if status == domain.OrderCanceled {
 		status = "cancelled"
@@ -184,7 +222,12 @@ func OrderView(o domain.Order, webhook bool) OrderDTO {
 	for _, m := range o.Messages {
 		messages = append(messages, SMSDTO{ID: m.ID, Code: m.Code, Content: m.Text, ReceivedAt: m.ReceivedAt})
 	}
-	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Status: status, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, WebhookEnabled: webhook, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+	cancel := EvaluateCancelPolicy(o, now)
+	var waitSeconds *int
+	if cancel.WaitSeconds > 0 {
+		waitSeconds = &cancel.WaitSeconds
+	}
+	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Duration: o.Duration, Status: status, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, CurrentActivationHasMessages: hasCurrentActivationMessage(o), RenewalPending: o.RenewalInflight, WebhookEnabled: webhook, ExpiresAt: o.ExpiresAt, CanCancel: cancel.Allowed, CancelAvailableAt: cancel.AvailableAt, CancelWaitSeconds: waitSeconds, CancelUnavailableReason: cancel.UnavailableReason, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
 func UserView(u domain.User) UserDTO {
 	return UserDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Active, LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt}

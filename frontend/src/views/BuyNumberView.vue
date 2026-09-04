@@ -13,6 +13,7 @@ import { errorCode, errorMessage } from '@/api/http'
 import { authSession } from '@/stores/auth'
 import type {
   CountryOption,
+  DurationOption,
   ProviderBalance,
   ProviderCode,
   ProviderConfig,
@@ -39,12 +40,14 @@ const loadingProviders = ref(false)
 const loadingBalances = ref(false)
 const loadingCountries = ref(false)
 const loadingServices = ref(false)
+const loadingDurations = ref(false)
 const loadingQuote = ref(false)
 const purchasing = ref(false)
 const PURCHASE_INTENT_KEY = 'buy_sms_purchase_intent'
 const FORM_SELECTION_KEY = 'buy_sms_form_selection'
 const TERMINAL_PURCHASE_FAILURE_CODES = new Set([
   'configuration',
+  'duration_unavailable',
   'idempotency_mismatch',
   'insufficient_balance',
   'invalid_selection',
@@ -65,6 +68,7 @@ const providers = ref<ProviderConfig[]>([])
 const providerBalances = ref<Partial<Record<ProviderCode, ProviderBalance>>>({})
 const countries = ref<CountryOption[]>([])
 const services = ref<ServiceOption[]>([])
+const durationOptions = ref<DurationOption[]>([])
 const quotes = ref<Quote[]>([])
 const smsBowerTiers: { value: SmsBowerTier; label: string }[] = [
   { value: 'bronze', label: 'Bronze' },
@@ -74,6 +78,7 @@ const smsBowerTiers: { value: SmsBowerTier; label: string }[] = [
 
 let servicesGeneration = 0
 let countriesGeneration = 0
+let durationGeneration = 0
 let quoteGeneration = 0
 let providerRestoreGeneration = 0
 let balanceRefreshTimer: number | undefined
@@ -87,6 +92,7 @@ const form = reactive({
   serviceCode: '',
   tier: '' as SmsBowerTier | '',
   countryCode: '',
+  duration: '',
   priceSelection: '',
   maxPrice: '',
 })
@@ -95,6 +101,19 @@ const rules: FormRules = {
   provider: [{ required: true, message: '请选择供应商', trigger: 'change' }],
   serviceCode: [{ required: true, message: '请选择接码服务', trigger: 'change' }],
   countryCode: [{ required: true, message: '请选择国家或地区', trigger: 'change' }],
+  duration: [{
+    validator: (_rule, value, callback) => {
+      if (
+        form.provider !== 'herosms' ||
+        durationOptions.value.some((option) => option.value === value && option.available > 0)
+      ) {
+        callback()
+        return
+      }
+      callback(new Error('请选择可购买的时长'))
+    },
+    trigger: 'change',
+  }],
   priceSelection: [{ required: true, message: '请选择价格', trigger: 'change' }],
 }
 
@@ -103,6 +122,9 @@ function providerPurchasable(provider: ProviderConfig): boolean {
 }
 
 const purchasableProviders = computed(() => providers.value.filter(providerPurchasable))
+const selectedProviderPurchasable = computed(() =>
+  providers.value.some((provider) => provider.code === form.provider && providerPurchasable(provider)),
+)
 
 function providerBalanceText(provider: ProviderConfig): string {
   if (!provider.enabled) return '接口未启用 · 余额 —'
@@ -122,6 +144,7 @@ function providerBalanceText(provider: ProviderConfig): string {
 }
 
 function selectPurchasableProvider(): void {
+  if (purchasing.value) return
   const selected = providers.value.find((item) => item.code === form.provider)
   if (selected && providerPurchasable(selected)) return
   if (form.provider) form.provider = ''
@@ -141,6 +164,7 @@ interface ProviderSelection {
   serviceCode: string
   tier: SmsBowerTier | ''
   countryCode: string
+  duration: string
   priceSelection: string
   maxPrice: string
 }
@@ -148,17 +172,51 @@ interface ProviderSelection {
 interface PersistedProviderSelection {
   serviceCode: string
   countryCode: string
+  duration: string
 }
 
 const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool']
 const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
 let persistedProviderPreference: ProviderCode | '' = ''
+const DEFAULT_DURATION_SELECTION = 'duration:default'
 
 function priceOptionKey(tier: SmsBowerTier | undefined, price: string): string {
   return `${tier || 'standard'}:${price}`
 }
 
-const priceOptions = computed(() => {
+const selectedDurationOption = computed(() =>
+  durationOptions.value.find((option) => option.value === form.duration),
+)
+const durationSelectionKey = computed(() => {
+  const option = selectedDurationOption.value
+  return option ? durationOptionKey(option) : ''
+})
+
+const priceOptions = computed<DisplayPriceOption[]>(() => {
+  if (form.provider === 'herosms') {
+    const duration = selectedDurationOption.value
+    if (!duration) return []
+    const options = !duration.value && duration.priceOptions?.length
+      ? duration.priceOptions
+      : [{ price: duration.price, available: duration.available }]
+    const validOptions = options
+      .filter((option) => Number.isFinite(Number(option.price)) && Number(option.price) > 0 && option.available > 0)
+      .sort((left, right) => Number(left.price) - Number(right.price))
+      .map<DisplayPriceOption>((option) => ({
+        ...option,
+        key: priceOptionKey(undefined, option.price),
+        currency: 'USD',
+      }))
+    if (validOptions.length || !duration.priceOptions?.length) return validOptions
+    return [{
+      key: priceOptionKey(undefined, duration.price),
+      price: duration.price,
+      available: duration.available,
+      currency: 'USD',
+    } satisfies DisplayPriceOption].filter(
+      (option) => Number.isFinite(Number(option.price)) && Number(option.price) > 0 && option.available > 0,
+    )
+  }
   return quotes.value.flatMap((currentQuote) => {
     const options = currentQuote.priceOptions?.length
       ? currentQuote.priceOptions
@@ -187,11 +245,24 @@ function priceOptionLabel(option: DisplayPriceOption): string {
   return option.tier ? `${smsBowerTierLabel(option.tier)} · ${price}` : price
 }
 
+function durationOptionLabel(option: DurationOption): string {
+  if (option.value) {
+    const hours = option.hours || Number(option.value)
+    return hours % 24 === 0 ? `${hours / 24} 天（${hours} 小时）` : `${hours} 小时`
+  }
+  return `${option.minutes} 分钟（标准接码）`
+}
+
+function durationOptionKey(option: DurationOption): string {
+  return option.value ? `duration:${option.value}` : DEFAULT_DURATION_SELECTION
+}
+
 function snapshotSelection(): ProviderSelection {
   return {
     serviceCode: form.serviceCode,
     tier: form.tier,
     countryCode: form.countryCode,
+    duration: form.provider === 'herosms' ? form.duration : '',
     priceSelection: form.priceSelection,
     maxPrice: form.maxPrice,
   }
@@ -218,12 +289,16 @@ function readPersistedFormSelections(): ProviderCode | '' {
       for (const provider of providerCodes) {
         const raw = parsed.selections[provider]
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-        const selection = raw as { serviceCode?: unknown; countryCode?: unknown }
+        const selection = raw as { serviceCode?: unknown; countryCode?: unknown; duration?: unknown }
         const serviceCode = typeof selection.serviceCode === 'string' ? selection.serviceCode : ''
         const countryCode = typeof selection.countryCode === 'string' ? selection.countryCode : ''
+        const duration = provider === 'herosms' && typeof selection.duration === 'string'
+          ? selection.duration
+          : ''
         providerSelections[provider] = {
           serviceCode,
           countryCode,
+          duration,
           tier: '',
           priceSelection: '',
           maxPrice: '',
@@ -251,6 +326,7 @@ function persistFormSelections(): void {
     selections[provider] = {
       serviceCode: selection.serviceCode,
       countryCode: selection.countryCode,
+      duration: provider === 'herosms' ? selection.duration : '',
     }
   }
   try {
@@ -273,12 +349,30 @@ function clearPriceSelection(): void {
   quotes.value = []
 }
 
+function resetSelectedPrice(): void {
+  form.tier = ''
+  form.priceSelection = ''
+  form.maxPrice = ''
+}
+
 function selectPrice(selection: string): void {
   form.priceSelection = selection
   const option = priceOptions.value.find((item) => item.key === selection)
   form.tier = option?.tier || ''
   form.maxPrice = option?.price || ''
   saveCurrentSelection()
+}
+
+function selectDuration(selection: string): void {
+  const option = durationOptions.value.find((item) => durationOptionKey(item) === selection)
+  if (!option || option.available < 1) return
+  quoteGeneration += 1
+  loadingQuote.value = false
+  form.duration = option.value
+  resetSelectedPrice()
+  quotes.value = []
+  selectPrice(priceOptions.value[0]?.key || '')
+  formRef.value?.clearValidate('duration')
 }
 
 async function loadProviders(): Promise<void> {
@@ -376,6 +470,15 @@ async function performProviderBalanceRefresh(notify: boolean): Promise<void> {
 async function refreshProviders(): Promise<void> {
   await loadProviders()
   await forceLoadProviderBalances(true)
+  if (disposed || !form.provider || !form.countryCode || !form.serviceCode) return
+  if (form.provider === 'herosms') {
+    await loadHeroPurchaseOptions({
+      duration: form.duration,
+      priceSelection: form.priceSelection,
+    })
+  } else {
+    await loadQuote()
+  }
 }
 
 function handleVisibilityChange(): void {
@@ -451,11 +554,57 @@ async function loadCountries(): Promise<CountryOption[] | null> {
   }
 }
 
+function normalizeDurationOptions(options: DurationOption[]): DurationOption[] {
+  const normalized = new Map<string, DurationOption>()
+  for (const candidate of options) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) continue
+    const option = candidate as DurationOption
+    const validValue = option.value === '' || /^[1-9]\d*$/.test(option.value)
+    if (
+      !validValue ||
+      !Number.isInteger(option.minutes) ||
+      option.minutes < 1 ||
+      !Number.isFinite(Number(option.price)) ||
+      Number(option.price) <= 0 ||
+      !Number.isInteger(option.available) ||
+      option.available < 0
+    ) continue
+    normalized.set(option.value, option)
+  }
+  return [...normalized.values()].sort((left, right) => left.minutes - right.minutes)
+}
+
+async function loadDurations(): Promise<DurationOption[] | null> {
+  if (form.provider !== 'herosms' || !form.countryCode || !form.serviceCode) return null
+  const provider = form.provider
+  const country = form.countryCode
+  const service = form.serviceCode
+  const generation = ++durationGeneration
+  loadingDurations.value = true
+  try {
+    const result = normalizeDurationOptions(await catalogApi.durations(provider, country, service))
+    if (
+      generation !== durationGeneration ||
+      form.provider !== provider ||
+      form.countryCode !== country ||
+      form.serviceCode !== service
+    ) return null
+    durationOptions.value = result
+    return result
+  } catch (reason) {
+    if (generation === durationGeneration) ElMessage.error(errorMessage(reason, '购买时长加载失败'))
+    return null
+  } finally {
+    if (generation === durationGeneration) loadingDurations.value = false
+  }
+}
+
 async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<Quote[] | null> {
   if (!form.provider || !form.countryCode || !form.serviceCode) return null
   const provider = form.provider
   const country = form.countryCode
   const service = form.serviceCode
+  const duration = form.duration
   const savedSelection = form.priceSelection
   const generation = ++quoteGeneration
   loadingQuote.value = true
@@ -474,7 +623,8 @@ async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<
       generation !== quoteGeneration ||
       form.provider !== provider ||
       form.countryCode !== country ||
-      form.serviceCode !== service
+      form.serviceCode !== service ||
+      (provider === 'herosms' && form.duration !== duration)
     ) return null
     quotes.value = result
     if (provider === 'smsbower' && result.length < smsBowerTiers.length) {
@@ -495,6 +645,51 @@ async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<
   }
 }
 
+async function loadHeroPurchaseOptions(options: {
+  duration?: string
+  priceSelection?: string
+  requirePriceSelection?: boolean
+} = {}): Promise<void> {
+  const loadedDurations = await loadDurations()
+  if (!loadedDurations) return
+  const requestedDuration = options.duration || ''
+  const requestedOption = loadedDurations.find((option) => option.value === requestedDuration)
+  const defaultOption = loadedDurations.find((option) => option.value === '')
+  const selectedDuration = requestedDuration ? requestedOption : requestedOption || defaultOption
+  if (!selectedDuration) {
+    // 已明确选择的长租档位失效时保留原值用于校验，但不静默切换到
+    // 标准短时；用户必须根据最新目录重新选择。
+    form.duration = requestedDuration
+    resetSelectedPrice()
+    quotes.value = []
+    saveCurrentSelection()
+    if (requestedDuration) ElMessage.warning('此前选择的购买时长已不可用，请根据最新库存重新选择')
+    return
+  }
+
+  form.duration = selectedDuration.value
+  resetSelectedPrice()
+  quotes.value = []
+  if (selectedDuration.available < 1) {
+    saveCurrentSelection()
+    if (requestedDuration) ElMessage.warning('此前选择的购买时长当前无库存，请重新选择')
+    return
+  }
+  if (selectedDuration.value) {
+    selectPrice(options.requirePriceSelection ? '' : priceOptions.value[0]?.key || '')
+    return
+  }
+  const savedPrice = selectedDuration.value === requestedDuration
+    ? options.priceSelection || ''
+    : ''
+  const nextPrice = options.requirePriceSelection
+    ? ''
+    : priceOptions.value.some((option) => option.key === savedPrice)
+      ? savedPrice
+      : priceOptions.value[0]?.key || ''
+  selectPrice(nextPrice)
+}
+
 async function restoreProviderSelection(provider: ProviderCode, selection?: ProviderSelection): Promise<void> {
   const generation = ++providerRestoreGeneration
   restoringProviderSelection.value = true
@@ -510,7 +705,15 @@ async function restoreProviderSelection(provider: ProviderCode, selection?: Prov
 
     form.countryCode = selection.countryCode
     form.priceSelection = selection.priceSelection
-    await loadQuote({ requireSelection: !selection.priceSelection })
+    if (provider === 'herosms') {
+      await loadHeroPurchaseOptions({
+        duration: selection.duration,
+        priceSelection: selection.priceSelection,
+        requirePriceSelection: !selection.priceSelection,
+      })
+    } else {
+      await loadQuote({ requireSelection: !selection.priceSelection })
+    }
   } finally {
     if (generation === providerRestoreGeneration) {
       restoringProviderSelection.value = false
@@ -524,17 +727,21 @@ watch(
     providerRestoreGeneration += 1
     servicesGeneration += 1
     countriesGeneration += 1
+    durationGeneration += 1
     quoteGeneration += 1
     loadingServices.value = false
     loadingCountries.value = false
+    loadingDurations.value = false
     loadingQuote.value = false
     form.serviceCode = ''
     form.tier = ''
     form.countryCode = ''
+    form.duration = ''
     form.priceSelection = ''
     form.maxPrice = ''
     services.value = []
     countries.value = []
+    durationOptions.value = []
     quotes.value = []
     restoringProviderSelection.value = false
     persistFormSelections()
@@ -547,11 +754,15 @@ watch(
   (service) => {
     if (restoringProviderSelection.value) return
     countriesGeneration += 1
+    durationGeneration += 1
     quoteGeneration += 1
     loadingCountries.value = false
+    loadingDurations.value = false
     loadingQuote.value = false
     form.countryCode = ''
+    form.duration = ''
     countries.value = []
+    durationOptions.value = []
     clearPriceSelection()
     saveCurrentSelection()
     if (service) void loadCountries()
@@ -562,11 +773,18 @@ watch(
   () => form.countryCode,
   (country) => {
     if (restoringProviderSelection.value) return
+    durationGeneration += 1
     quoteGeneration += 1
+    loadingDurations.value = false
     loadingQuote.value = false
+    form.duration = ''
+    durationOptions.value = []
     clearPriceSelection()
     saveCurrentSelection()
-    if (country) void loadQuote()
+    if (country) {
+      if (form.provider === 'herosms') void loadHeroPurchaseOptions()
+      else void loadQuote()
+    }
   },
 )
 
@@ -606,6 +824,8 @@ interface PurchaseConditionSnapshot {
   serviceCode: string
   tier: SmsBowerTier | ''
   countryCode: string
+  duration: string
+  durationLabel: string
   maxPrice: string
 }
 
@@ -632,6 +852,17 @@ function uncertainTransportFailureMessage(reason: unknown, applicationCode: stri
   return ''
 }
 
+function purchaseConditionsStillSelected(conditions: PurchaseConditionSnapshot): boolean {
+  return (
+    form.provider === conditions.provider &&
+    form.serviceCode === conditions.serviceCode &&
+    form.tier === conditions.tier &&
+    form.countryCode === conditions.countryCode &&
+    (form.provider === 'herosms' ? form.duration : '') === conditions.duration &&
+    form.maxPrice.trim() === conditions.maxPrice
+  )
+}
+
 async function confirmPurchaseRetryUnlock(
   storageKey: string,
   signature: string,
@@ -647,6 +878,9 @@ async function confirmPurchaseRetryUnlock(
     conditions.countryCode +
     '；号码等级：' +
     (conditions.tier || '默认') +
+    (conditions.provider === 'herosms'
+      ? '；购买时长：' + conditions.durationLabel
+      : '') +
     '；最高价格：' +
     formatMoney(conditions.maxPrice, 'USD')
   try {
@@ -692,6 +926,10 @@ async function purchase(): Promise<void> {
       serviceCode: form.serviceCode,
       tier: form.tier,
       countryCode: form.countryCode,
+      duration: form.provider === 'herosms' ? form.duration : '',
+      durationLabel: form.provider === 'herosms' && selectedDurationOption.value
+        ? durationOptionLabel(selectedDurationOption.value)
+        : '标准接码',
       maxPrice: form.maxPrice.trim(),
     }
     requestSignature = createPurchaseSignature(requestConditions)
@@ -707,6 +945,7 @@ async function purchase(): Promise<void> {
         countryCode: requestConditions.countryCode,
         serviceCode: requestConditions.serviceCode,
         ...(requestConditions.tier ? { tier: requestConditions.tier } : {}),
+        ...(requestConditions.duration ? { duration: requestConditions.duration } : {}),
         maxPrice: requestConditions.maxPrice,
       },
       requestKey,
@@ -720,8 +959,18 @@ async function purchase(): Promise<void> {
     if (disposed) return
     ElMessage.success('号码购买成功，已开始持续接收验证码')
     formRef.value?.clearValidate()
-    saveCurrentSelection()
-    await Promise.all([ordersRef.value?.revealLatest(), loadQuote(), forceLoadProviderBalances()])
+    if (purchaseConditionsStillSelected(requestConditions)) {
+      saveCurrentSelection()
+      const refreshPurchaseOptions = requestConditions.provider === 'herosms'
+        ? loadHeroPurchaseOptions({
+            duration: requestConditions.duration,
+            priceSelection: form.priceSelection,
+          })
+        : loadQuote()
+      await Promise.all([ordersRef.value?.revealLatest(), refreshPurchaseOptions, forceLoadProviderBalances()])
+    } else {
+      await Promise.all([ordersRef.value?.revealLatest(), forceLoadProviderBalances()])
+    }
   } catch (reason) {
     if (reason instanceof PurchaseIntentPersistenceError) {
       if (!disposed) ElMessage.error(reason.message)
@@ -748,6 +997,17 @@ async function purchase(): Promise<void> {
       )
     }
     if (disposed) return
+    if (
+      requestConditions &&
+      requestConditions.provider === 'herosms' &&
+      (code === 'no_numbers' || code === 'price_exceeded' || code === 'duration_unavailable') &&
+      purchaseConditionsStillSelected(requestConditions)
+    ) {
+      await loadHeroPurchaseOptions({
+        duration: requestConditions.duration,
+        requirePriceSelection: true,
+      })
+    }
     const transportFailureMessage = uncertainTransportFailureMessage(reason, code)
     const failureMessage = transportFailureMessage || errorMessage(reason, '购买失败，请调整条件后重试')
     if (
@@ -762,6 +1022,7 @@ async function purchase(): Promise<void> {
     }
   } finally {
     purchasing.value = false
+    selectPurchasableProvider()
   }
 }
 
@@ -787,6 +1048,7 @@ onBeforeUnmount(() => {
   providerRestoreGeneration += 1
   servicesGeneration += 1
   countriesGeneration += 1
+  durationGeneration += 1
   quoteGeneration += 1
 })
 </script>
@@ -795,7 +1057,14 @@ onBeforeUnmount(() => {
   <div class="page-stack buy-page">
     <PageHeader title="号码管理" description="选择号码资源并直接购买，下方可管理订单与持续接收验证码。">
       <template #actions>
-        <el-button :icon="Refresh" :loading="loadingProviders || loadingBalances" @click="refreshProviders">刷新平台</el-button>
+        <el-button
+          :icon="Refresh"
+          :loading="loadingProviders || loadingBalances || loadingDurations || loadingQuote"
+          :disabled="purchasing"
+          @click="refreshProviders"
+        >
+          刷新平台
+        </el-button>
       </template>
     </PageHeader>
 
@@ -814,10 +1083,10 @@ onBeforeUnmount(() => {
                 :key="provider.code"
                 type="button"
                 class="provider-option"
-                :class="{ selected: form.provider === provider.code, disabled: !providerPurchasable(provider) }"
-                :disabled="!providerPurchasable(provider)"
-                :aria-disabled="!providerPurchasable(provider)"
-                @click="providerPurchasable(provider) && (form.provider = provider.code)"
+                :class="{ selected: form.provider === provider.code, disabled: purchasing || !providerPurchasable(provider) }"
+                :disabled="purchasing || !providerPurchasable(provider)"
+                :aria-disabled="purchasing || !providerPurchasable(provider)"
+                @click="!purchasing && providerPurchasable(provider) && (form.provider = provider.code)"
               >
                 <span class="provider-logo" :class="`provider-${provider.code}`">{{ providerName(provider.code).slice(0, 1) }}</span>
                 <span>
@@ -835,7 +1104,7 @@ onBeforeUnmount(() => {
               v-model="form.serviceCode"
               filterable
               :loading="loadingServices"
-              :disabled="!form.provider || restoringProviderSelection"
+              :disabled="purchasing || !form.provider || restoringProviderSelection"
               placeholder="请先选择接码服务"
               style="width: 100%"
             >
@@ -851,7 +1120,7 @@ onBeforeUnmount(() => {
               v-model="form.countryCode"
               filterable
               :loading="loadingCountries"
-              :disabled="!form.serviceCode || restoringProviderSelection"
+              :disabled="purchasing || !form.serviceCode || restoringProviderSelection"
               placeholder="请先选择服务，再选择国家或地区"
               style="width: 100%"
             >
@@ -862,11 +1131,34 @@ onBeforeUnmount(() => {
             </el-select>
           </el-form-item>
 
+          <el-form-item v-if="form.provider === 'herosms'" label="购买时长" prop="duration">
+            <el-select
+              :model-value="durationSelectionKey"
+              :loading="loadingDurations"
+              :disabled="purchasing || !form.countryCode || loadingDurations || !durationOptions.length || restoringProviderSelection"
+              :placeholder="loadingDurations ? '正在加载可购时长' : durationOptions.length ? '请选择购买时长' : '选择国家后加载时长'"
+              style="width: 100%"
+              @change="selectDuration"
+            >
+              <el-option
+                v-for="durationOption in durationOptions"
+                :key="durationOptionKey(durationOption)"
+                :label="durationOptionLabel(durationOption)"
+                :value="durationOptionKey(durationOption)"
+                :disabled="durationOption.available < 1"
+              >
+                <span class="select-option-main">{{ durationOptionLabel(durationOption) }}</span>
+                <small>{{ durationOption.available }} 个可用 · {{ formatMoney(durationOption.price, 'USD') }}</small>
+              </el-option>
+            </el-select>
+            <p class="form-help">可购时长、价格和库存均来自 HeroSMS 实时接口；标准接码仍可继续选择价格档位。</p>
+          </el-form-item>
+
           <el-form-item label="选择价格" prop="priceSelection">
             <el-select
               :model-value="form.priceSelection"
               :loading="loadingQuote"
-              :disabled="!priceOptions.length || loadingQuote"
+              :disabled="purchasing || !priceOptions.length || loadingQuote"
               :placeholder="loadingQuote ? '正在刷新价格' : priceOptions.length ? '请选择最新价格' : '选择国家后加载价格'"
               style="width: 100%"
               @change="selectPrice"
@@ -898,7 +1190,7 @@ onBeforeUnmount(() => {
               size="large"
               :icon="ShoppingCart"
               :loading="purchasing"
-              :disabled="!selectedPriceOption || selectedPriceOption.available < 1"
+              :disabled="!selectedProviderPurchasable || !selectedPriceOption || selectedPriceOption.available < 1"
               @click="purchase"
             >
               购买号码

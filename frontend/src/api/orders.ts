@@ -1,5 +1,12 @@
 import { http, unwrap } from './http'
-import type { NumberOrder, OrderQuery, PageResult, PurchasePayload } from '@/types/api'
+import type {
+  NumberOrder,
+  OrderQuery,
+  PageResult,
+  PurchasePayload,
+  RenewalOptions,
+  RenewalPayload,
+} from '@/types/api'
 
 export const ordersApi = {
   create: (payload: PurchasePayload, idempotencyKey: string) =>
@@ -14,4 +21,13 @@ export const ordersApi = {
   detail: (id: string) => http.get<NumberOrder>(`/orders/${id}`).then(unwrap),
   complete: (id: string) => http.post<NumberOrder>(`/orders/${id}/complete`).then(unwrap),
   cancel: (id: string) => http.post<NumberOrder>(`/orders/${id}/cancel`).then(unwrap),
+  renewalOptions: (id: string) =>
+    http.get<RenewalOptions>(`/orders/${id}/renewal-options`).then(unwrap),
+  renew: (id: string, payload: RenewalPayload, idempotencyKey: string) =>
+    http
+      .post<NumberOrder>(`/orders/${id}/renew`, payload, {
+        headers: { 'Idempotency-Key': idempotencyKey },
+        timeout: 50_000,
+      })
+      .then(unwrap),
 }

@@ -69,3 +69,77 @@ func TestFailIncludesStableDefaultCode(t *testing.T) {
 		t.Fatalf("响应=%s", recorder.Body.String())
 	}
 }
+
+func TestRespondErrorOrderActionContract(t *testing.T) {
+	tests := []struct {
+		name, code, message string
+		kind                error
+		status              int
+	}{
+		{
+			name: "暂未到取消时间", code: application.OrderActionCodeCancelNotAvailableYet,
+			message: "号码暂时还不能取消，请稍后重试", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "订单不允许取消", code: application.OrderActionCodeCancelNotAllowed,
+			message: "号码已收到短信，不能取消", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "续期幂等参数冲突", code: application.OrderActionCodeRenewalIdempotencyMismatch,
+			message: "该续期请求编号已用于其他订单或选项，请刷新后重新确认", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "续期不可用", code: application.OrderActionCodeRenewalNotAvailable,
+			message: "该号码当前没有可用的续期方案", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "续期价格变化", code: application.OrderActionCodeRenewalPriceChanged,
+			message: "供应商续期价格已变化，请重新确认最新报价", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "续期处理中", code: application.OrderActionCodeRenewalInProgress,
+			message: "该号码的续期请求正在处理或结果待确认，请先核对供应商订单", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
+			name: "续期结果待确认", code: application.OrderActionCodeRenewalResultUnknown,
+			message: "续期结果尚未确认", kind: application.ErrProvider,
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "续期余额不足", code: application.OrderActionCodeRenewalNoBalance,
+			message: "供应商账户余额不足，续期尚未提交", kind: application.ErrProvider,
+			status: http.StatusBadGateway,
+		},
+		{
+			name: "供应商普通故障", code: application.OrderActionCodeProviderError,
+			message: "供应商暂时不可用，请稍后重试", kind: application.ErrProvider,
+			status: http.StatusBadGateway,
+		},
+	}
+	gin.SetMode(gin.TestMode)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(http.MethodPost, "/api/orders/order-1/cancel", nil)
+
+			respondError(context, &application.OrderActionError{
+				Action: "cancel", Code: tt.code, Message: tt.message, Kind: tt.kind, Cause: errors.New("private detail"),
+			})
+
+			if recorder.Code != tt.status {
+				t.Fatalf("HTTP 状态=%d，期望=%d；正文=%s", recorder.Code, tt.status, recorder.Body.String())
+			}
+			expected := `{"code":"` + tt.code + `","message":"` + tt.message + `"}`
+			if recorder.Body.String() != expected {
+				t.Fatalf("响应=%s，期望=%s", recorder.Body.String(), expected)
+			}
+		})
+	}
+}

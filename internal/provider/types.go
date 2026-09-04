@@ -27,6 +27,10 @@ const (
 	PollRefunded     = "refunded"
 	PollUnknown      = "unknown"
 
+	// CodeCancelNotAvailableYet 统一表示供应商仍处于短暂取消锁定期。
+	// 原始响应正文不会保存在 ProviderError 中。
+	CodeCancelNotAvailableYet = "CANCEL_NOT_AVAILABLE_YET"
+
 	defaultTimeout = 15 * time.Second
 )
 
@@ -46,6 +50,52 @@ type Client interface {
 	Complete(context.Context, string, string) error
 	Cancel(context.Context, string, string) error
 	RequestAnother(context.Context, string, string) (RequestAnotherResult, error)
+}
+
+const (
+	RenewalProlong    = "prolong"
+	RenewalReactivate = "reactivate"
+)
+
+// RenewalClient 是供应商可选实现的号码续期能力，不属于所有供应商都必须
+// 实现的 Client 最小接口。
+type RenewalClient interface {
+	RenewalOptions(context.Context, string, string, string) ([]RenewalOption, error)
+	Renew(context.Context, string, string, RenewalRequest) (RenewalResult, error)
+}
+
+// RenewalReconcileClient recovers an already-submitted renewal from provider
+// read APIs without submitting the money-changing request again.
+type RenewalReconcileClient interface {
+	ReconcileRenewal(context.Context, string, string, RenewalRequest) (RenewalResult, bool, error)
+}
+
+type RenewalOption struct {
+	Value    int
+	Unit     string
+	Price    float64
+	Baseline string
+}
+
+type RenewalRequest struct {
+	Mode        string
+	Value       int
+	Unit        string
+	SubmittedAt time.Time
+	PhoneNumber string
+	Country     string
+	Service     string
+	Baseline    string
+}
+
+type RenewalResult struct {
+	UpstreamID       string
+	PhoneNumber      string
+	Cost             float64
+	Currency         string
+	CanGetAnotherSMS bool
+	ExpiresAt        *time.Time
+	Raw              json.RawMessage
 }
 
 // BalanceResult 保留供应商返回的十进制文本，避免展示时丢失精度或尾随零。

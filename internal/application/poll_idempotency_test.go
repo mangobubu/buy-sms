@@ -27,6 +27,19 @@ type pollingRepository struct {
 	pollUpdateCount int
 }
 
+func (r *pollingRepository) WithOrderLock(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
+}
+
+func (r *pollingRepository) GetOrder(_ context.Context, id, _ string) (domain.Order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.order.ID != id {
+		return domain.Order{}, store.ErrNotFound
+	}
+	return r.order, nil
+}
+
 type statusGenerationRepository struct {
 	*lifecycleRepository
 }

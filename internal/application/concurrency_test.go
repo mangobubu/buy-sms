@@ -46,6 +46,9 @@ func (r *lifecycleRepository) ClaimDueOrders(context.Context, int, time.Time, ti
 
 func (r *lifecycleRepository) Maintenance(context.Context, time.Time) error { return nil }
 
+func (r *lifecycleRepository) ClaimDueRenewals(context.Context, int, time.Time, time.Duration) ([]domain.Order, error) {
+	return []domain.Order{}, nil
+}
 func (r *lifecycleRepository) WithOrderLock(ctx context.Context, id string, callback func(context.Context) error) error {
 	r.mu.Lock()
 	if r.locks == nil {

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -124,12 +126,25 @@ func (c *smsActivateClient) Purchase(ctx context.Context, apiKey string, request
 		return PurchaseResult{}, err
 	}
 	query := c.purchaseQuery(request)
-	query.Set("action", "getNumberV2")
+	if request.Duration != "" {
+		duration, err := normalizeRentalDuration(request.Duration)
+		if err != nil {
+			return PurchaseResult{}, err
+		}
+		query.Set("action", "getRentNumber")
+		query.Set("duration", duration)
+		// HeroSMS 的兼容长租接口不接受普通激活的精确价格参数。应用层会在
+		// 下单前用 serviceCountRent 锁定实时租价，并在响应后校验/补全成本。
+		query.Del("maxPrice")
+		query.Del("fixedPrice")
+	} else {
+		query.Set("action", "getNumberV2")
+	}
 	payload, err := c.http.get(ctx, "purchase", apiKey, "", query, false)
 	if err != nil {
 		return PurchaseResult{}, err
 	}
-	if token := legacyToken(payload); token == "BAD_ACTION" {
+	if token := legacyToken(payload); request.Duration == "" && token == "BAD_ACTION" {
 		// getNumberV2 未执行购买时可以安全降级到基础接口。
 		query.Set("action", "getNumber")
 		payload, err = c.http.get(ctx, "purchase", apiKey, "", query, false)
@@ -145,6 +160,88 @@ func (c *smsActivateClient) Purchase(ctx context.Context, apiKey string, request
 		return PurchaseResult{}, c.http.failure("purchase", "INVALID_RESPONSE", 0, false, nil)
 	}
 	return result, nil
+}
+
+func (c *smsActivateClient) RentDurations(ctx context.Context, apiKey, country, service string) ([]DurationOption, error) {
+	if err := require(apiKey, country, service); err != nil {
+		return nil, err
+	}
+	query := url.Values{
+		"action":  {"serviceCountRent"},
+		"country": {country},
+		"service": {service},
+	}
+	payload, err := c.http.get(ctx, "catalog.duration.rent", apiKey, "", query, false)
+	if err != nil {
+		return nil, err
+	}
+	if businessErr := c.businessError("catalog.duration.rent", apiKey, payload); businessErr != nil {
+		return nil, businessErr
+	}
+	options, parseErr := parseRentDurations(payload, country)
+	if parseErr != nil {
+		return nil, c.http.failure("catalog.duration.rent", "INVALID_RESPONSE", 0, false, nil)
+	}
+	return options, nil
+}
+
+func parseRentDurations(payload []byte, country string) ([]DurationOption, error) {
+	value, err := decodeAny(payload)
+	if err != nil {
+		return nil, err
+	}
+	if text, ok := value.(string); ok && strings.TrimSpace(text) == "{}" {
+		return []DurationOption{}, nil
+	}
+	root, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("长租目录响应格式无效")
+	}
+	if nested, found := lookup(root, "data"); found {
+		var nestedOK bool
+		root, nestedOK = nested.(map[string]any)
+		if !nestedOK {
+			return nil, fmt.Errorf("长租目录响应格式无效")
+		}
+	}
+	if len(root) == 0 {
+		return []DurationOption{}, nil
+	}
+	rawDurations, found := lookup(root, country)
+	if !found {
+		return []DurationOption{}, nil
+	}
+	durations, ok := rawDurations.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("长租目录响应格式无效")
+	}
+	options := make([]DurationOption, 0, len(durations))
+	for rawHours, rawOffer := range durations {
+		hoursText, durationErr := normalizeRentalDuration(rawHours)
+		if durationErr != nil {
+			continue
+		}
+		offer, offerOK := rawOffer.(map[string]any)
+		if !offerOK {
+			continue
+		}
+		rawAvailable, countFound := lookup(offer, "count")
+		available, countOK := positiveInteger(rawAvailable)
+		price, priceOK := firstFloat(offer, "price")
+		if !priceOK || price <= 0 {
+			price, priceOK = firstFloat(offer, "retail_price", "retailPrice")
+		}
+		if !countFound || !countOK || !priceOK || price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			continue
+		}
+		hours, _ := strconv.Atoi(hoursText)
+		options = append(options, DurationOption{
+			Value: hoursText, Hours: hours, Minutes: hours * 60,
+			Price: price, Available: available,
+		})
+	}
+	sort.Slice(options, func(i, j int) bool { return options[i].Hours < options[j].Hours })
+	return options, nil
 }
 
 func (c *smsActivateClient) purchaseQuery(request PurchaseRequest) url.Values {
@@ -165,7 +262,7 @@ func (c *smsActivateClient) purchaseQuery(request PurchaseRequest) url.Values {
 	}
 	for key, value := range request.Extra {
 		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "", "api_key", "key", "action", "country", "service", "id", "status":
+		case "", "api_key", "key", "action", "country", "service", "duration", "id", "status":
 			continue
 		}
 		query.Set(key, value)
@@ -285,10 +382,12 @@ func (c *smsActivateClient) businessError(operation, apiKey string, payload []by
 	}
 	switch token {
 	case "BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_STATUS",
+		"BAD_DURATION", "WRONG_SERVICE", "WRONG_COUNTRY",
 		"NO_NUMBERS", "NO_BALANCE", "NO_ACTIVATION", "EARLY_CANCEL_DENIED",
 		"WRONG_MAX_PRICE", "MAX_PRICE_EXCEEDED", "ACCOUNT_INACTIVE", "BANNED",
 		"ERROR_SQL", "NO_CONNECTION", "RATE_LIMIT":
-		return c.http.failure(operation, token, 0, token == "RATE_LIMIT" || token == "NO_CONNECTION", nil)
+		retryable := token == "RATE_LIMIT" || token == "NO_CONNECTION" || token == "EARLY_CANCEL_DENIED"
+		return c.http.failure(operation, token, 0, retryable, nil)
 	}
 	return nil
 }
@@ -334,6 +433,20 @@ func purchaseResultFromValue(value any, raw json.RawMessage) (PurchaseResult, er
 	if object, ok := value.(map[string]any); ok {
 		if nested, found := lookup(object, "data", "activation", "result"); found {
 			value = nested
+		} else if nested, found := lookup(object, "phone"); found {
+			// HeroSMS 的兼容长租接口会把号码、订单 ID 和到期时间放在
+			// phone 对象中，同时把状态等字段保留在外层。合并两层后再走
+			// 通用解析，既兼容真实响应，也保留扁平响应支持。
+			if phone, nestedOK := nested.(map[string]any); nestedOK {
+				merged := make(map[string]any, len(object)+len(phone))
+				for key, item := range object {
+					merged[key] = item
+				}
+				for key, item := range phone {
+					merged[key] = item
+				}
+				value = merged
+			}
 		}
 	}
 	if list, ok := value.([]any); ok {
@@ -362,12 +475,12 @@ func purchaseResultFromValue(value any, raw json.RawMessage) (PurchaseResult, er
 	if value, found := lookup(object, "canGetAnotherSms", "can_get_another_sms", "resend"); found {
 		result.CanGetAnotherSMS, _ = boolValue(value)
 	}
-	if value, found := lookup(object, "expiresAt", "expiredAt", "expires_at", "expiration", "expiry"); found {
+	if value, found := lookup(object, "expiresAt", "expiredAt", "expires_at", "expiration", "expiry", "activationEndTime", "endDate"); found {
 		result.ExpiresAt = parseTimeValue(value)
 	}
 	if result.ExpiresAt == nil {
 		if value, found := lookup(object, "expiresIn", "expires_in"); found {
-			if seconds, ok := intValue(value); ok && seconds > 0 {
+			if seconds, ok := intValue(value); ok && seconds >= 0 {
 				expiresAt := time.Now().UTC().Add(time.Duration(seconds) * time.Second)
 				result.ExpiresAt = &expiresAt
 			}

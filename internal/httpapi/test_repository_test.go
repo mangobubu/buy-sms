@@ -153,6 +153,9 @@ func (r *memoryRepository) SaveWebhookEvent(_ context.Context, record store.Webh
 	return true, nil
 }
 
+func (r *memoryRepository) ClaimDueRenewals(context.Context, int, time.Time, time.Duration) ([]domain.Order, error) {
+	return []domain.Order{}, nil
+}
 func (r *memoryRepository) ClaimDueOrders(_ context.Context, limit int, now time.Time, _ time.Duration) ([]domain.Order, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -161,7 +164,7 @@ func (r *memoryRepository) ClaimDueOrders(_ context.Context, limit int, now time
 		if len(claimed) == limit {
 			break
 		}
-		if order.Status != domain.OrderActive || order.NextPollAt.After(now) || r.claimed[id] {
+		if order.Status != domain.OrderActive || order.RenewalInflight || order.NextPollAt.After(now) || r.claimed[id] {
 			continue
 		}
 		r.claimed[id] = true
@@ -170,6 +173,37 @@ func (r *memoryRepository) ClaimDueOrders(_ context.Context, limit int, now time
 	return claimed, nil
 }
 
+func (r *memoryRepository) WithOrderLock(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
+}
+
+func (r *memoryRepository) GetOrder(_ context.Context, id, userID string) (domain.Order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	order, ok := r.orders[id]
+	if !ok || (userID != "" && order.UserID != userID) {
+		return domain.Order{}, store.ErrNotFound
+	}
+	order.Messages = nil
+	for _, message := range r.messages {
+		if message.OrderID == id {
+			order.Messages = append(order.Messages, message)
+		}
+	}
+	return order, nil
+}
+
+func (r *memoryRepository) UpdateOrderExpiresAt(_ context.Context, id string, expiresAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	order, ok := r.orders[id]
+	if !ok || order.Status != domain.OrderActive {
+		return store.ErrConflict
+	}
+	order.ExpiresAt = &expiresAt
+	r.orders[id] = order
+	return nil
+}
 func (r *memoryRepository) SaveMessage(_ context.Context, message domain.SMSMessage, advance bool) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -239,7 +273,7 @@ func (r *memoryRepository) Dashboard(_ context.Context, userID string) (domain.D
 			dashboard.ActiveOrders++
 		}
 		dashboard.TodayOrders++
-		if order.Status != domain.OrderCanceled {
+		if order.Status == domain.OrderCompleted {
 			dashboard.TodayCost += order.Cost
 		}
 		for _, message := range r.messages {

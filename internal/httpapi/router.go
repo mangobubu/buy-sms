@@ -62,12 +62,15 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.GET("/catalog/countries", h.countries)
 	authed.GET("/catalog/services", h.services)
 	authed.GET("/catalog/quote", h.quote)
+	authed.GET("/catalog/durations", h.durations)
 	authed.POST("/orders", h.createOrder)
 	authed.GET("/purchase-attempts", h.purchaseAttempts)
 	authed.GET("/orders", h.orders)
 	authed.GET("/orders/:id", h.order)
 	authed.POST("/orders/:id/complete", h.completeOrder)
 	authed.POST("/orders/:id/cancel", h.cancelOrder)
+	authed.GET("/orders/:id/renewal-options", h.renewalOptions)
+	authed.POST("/orders/:id/renew", h.renewOrder)
 	authed.GET("/users", h.requireAdmin(), h.users)
 	authed.POST("/users", h.requireAdmin(), h.createUser)
 	authed.PUT("/users/:id", h.requireAdmin(), h.updateUser)
@@ -291,6 +294,14 @@ func (h *Handler) quote(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, value)
 }
+func (h *Handler) durations(c *gin.Context) {
+	value, err := h.app.Durations(c.Request.Context(), c.Query("provider"), c.Query("country"), c.Query("service"))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
 func (h *Handler) createOrder(c *gin.Context) {
 	var in application.PurchaseInput
 	if !bind(c, &in) {
@@ -324,6 +335,28 @@ func (h *Handler) orders(c *gin.Context) {
 }
 func (h *Handler) order(c *gin.Context) {
 	value, err := h.app.Order(c.Request.Context(), c.Param("id"), currentUser(c))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
+func (h *Handler) renewalOptions(c *gin.Context) {
+	value, err := h.app.RenewalOptions(c.Request.Context(), c.Param("id"), currentUser(c))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
+
+func (h *Handler) renewOrder(c *gin.Context) {
+	var in application.RenewalInput
+	if !bind(c, &in) {
+		return
+	}
+	in.IdempotencyKey = strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	value, err := h.app.RenewOrder(c.Request.Context(), c.Param("id"), in, currentUser(c), c.ClientIP())
 	if err != nil {
 		respondError(c, err)
 		return
@@ -427,11 +460,24 @@ func currentUser(c *gin.Context) domain.User {
 	return u
 }
 func respondError(c *gin.Context, err error) {
+	var actionErr *application.OrderActionError
+	if errors.As(err, &actionErr) {
+		status := http.StatusBadGateway
+		switch actionErr.Code {
+		case application.OrderActionCodeCancelNotAvailableYet, application.OrderActionCodeCancelNotAllowed,
+			application.OrderActionCodeRenewalNotAvailable, application.OrderActionCodeRenewalPriceChanged,
+			application.OrderActionCodeRenewalInProgress,
+			application.OrderActionCodeRenewalIdempotencyMismatch:
+			status = http.StatusConflict
+		}
+		failWithCode(c, status, actionErr.Code, actionErr.Message)
+		return
+	}
 	var purchaseErr *application.PurchaseError
 	if errors.As(err, &purchaseErr) {
 		status := http.StatusInternalServerError
 		switch purchaseErr.Code {
-		case "idempotency_mismatch", "purchase_in_progress", "purchase_result_unknown", "price_exceeded", "no_numbers", "provider_disabled", "purchase_failed":
+		case "idempotency_mismatch", "purchase_in_progress", "purchase_result_unknown", "price_exceeded", "no_numbers", "duration_unavailable", "provider_disabled", "purchase_failed":
 			status = http.StatusConflict
 		case "invalid_selection":
 			status = http.StatusBadRequest

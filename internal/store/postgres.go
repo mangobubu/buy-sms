@@ -409,8 +409,8 @@ WHERE o.provider_id = $1
 const insertOrderSQL = `
 INSERT INTO orders(
     id,user_id,provider_id,upstream_id,phone_number,
-    country_code,country_name,service_code,service_name,quality_tier,
-    status,cost,currency,can_get_another_sms,next_poll_at,expires_at
+    country_code,country_name,service_code,service_name,quality_tier,duration,
+    status,cost,currency,can_get_another_sms,next_poll_at,expires_at,created_at
 )
 SELECT
     $1,$2,$3,$4,$5,
@@ -437,13 +437,17 @@ SELECT
         ORDER BY (pc.country = $6) DESC, pc.updated_at DESC, pc.name
         LIMIT 1
     ), ''),
-    $10,$11,$12,$13,$14,$15,$16`
+    $10,$11,$12,$13,$14,$15,$16,$17,COALESCE($18::timestamptz,now())`
 
 func orderInsertArgs(o domain.Order) []any {
+	var createdAt any
+	if !o.CreatedAt.IsZero() {
+		createdAt = o.CreatedAt
+	}
 	return []any{
 		o.ID, o.UserID, o.ProviderID, o.UpstreamID, o.PhoneNumber,
-		o.CountryCode, o.CountryName, o.ServiceCode, o.ServiceName, o.QualityTier,
-		o.Status, o.Cost, o.Currency, o.CanGetAnotherSMS, o.NextPollAt, o.ExpiresAt,
+		o.CountryCode, o.CountryName, o.ServiceCode, o.ServiceName, o.QualityTier, o.Duration,
+		o.Status, o.Cost, o.Currency, o.CanGetAnotherSMS, o.NextPollAt, o.ExpiresAt, createdAt,
 	}
 }
 
@@ -455,7 +459,7 @@ func (s *Postgres) CreateOrder(ctx context.Context, o domain.Order) error {
 	return err
 }
 func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (PurchaseRecord, bool, error) {
-	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,max_price,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.QualityTier, r.MaxPrice)
+	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.QualityTier, r.Duration, r.MaxPrice)
 	if err != nil {
 		return PurchaseRecord{}, false, err
 	}
@@ -464,7 +468,7 @@ func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (Purch
 		return r, true, nil
 	}
 	var existing PurchaseRecord
-	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,max_price::float8,status,COALESCE(order_id::text,''),COALESCE(error_code,''),created_at,updated_at FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.QualityTier, &existing.MaxPrice, &existing.Status, &existing.OrderID, &existing.ErrorCode, &existing.CreatedAt, &existing.UpdatedAt)
+	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price::float8,status,COALESCE(order_id::text,''),COALESCE(error_code,''),created_at,updated_at FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.QualityTier, &existing.Duration, &existing.MaxPrice, &existing.Status, &existing.OrderID, &existing.ErrorCode, &existing.CreatedAt, &existing.UpdatedAt)
 	return existing, false, err
 }
 
@@ -493,7 +497,7 @@ const listPurchaseRequestsSQL = `SELECT
         ORDER BY (pc.country = pr.country_code) DESC,pc.updated_at DESC,pc.country,pc.name
         LIMIT 1
     ),''),
-    pr.quality_tier,pr.max_price::float8,pr.status,
+    pr.quality_tier,pr.duration,pr.max_price::float8,pr.status,
     COALESCE(pr.order_id::text,''),COALESCE(pr.error_code,''),pr.created_at,pr.updated_at
 FROM purchase_requests AS pr
 WHERE pr.user_id=$1
@@ -512,7 +516,7 @@ func (s *Postgres) ListPurchaseRequests(ctx context.Context, userID string, limi
 	records := make([]PurchaseRecord, 0, limit)
 	for rows.Next() {
 		var record PurchaseRecord
-		if err = rows.Scan(&record.ID, &record.UserID, &record.IdempotencyKey, &record.ProviderID, &record.CountryCode, &record.CountryName, &record.ServiceCode, &record.ServiceName, &record.QualityTier, &record.MaxPrice, &record.Status, &record.OrderID, &record.ErrorCode, &record.CreatedAt, &record.UpdatedAt); err != nil {
+		if err = rows.Scan(&record.ID, &record.UserID, &record.IdempotencyKey, &record.ProviderID, &record.CountryCode, &record.CountryName, &record.ServiceCode, &record.ServiceName, &record.QualityTier, &record.Duration, &record.MaxPrice, &record.Status, &record.OrderID, &record.ErrorCode, &record.CreatedAt, &record.UpdatedAt); err != nil {
 			return nil, err
 		}
 		records = append(records, record)
@@ -546,11 +550,11 @@ func (s *Postgres) FailPurchase(ctx context.Context, id, status, code string) er
 	return err
 }
 
-const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,o.expires_at,o.created_at,o.updated_at`
+const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.duration,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,COALESCE(o.renewal_request_id::text,''),o.renewal_inflight,o.renewal_inflight_at,o.renewal_mode,o.renewal_value,o.renewal_unit,o.renewal_quoted_price::float8,o.renewal_baseline,o.renewal_submitted_at,o.activation_started_at,o.non_refundable,o.expires_at,o.created_at,o.updated_at`
 
 func scanOrder(row pgx.Row) (domain.Order, error) {
 	var o domain.Order
-	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.CountryName, &o.ServiceCode, &o.ServiceName, &o.QualityTier, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.CountryName, &o.ServiceCode, &o.ServiceName, &o.QualityTier, &o.Duration, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.RenewalRequestID, &o.RenewalInflight, &o.RenewalInflightAt, &o.RenewalMode, &o.RenewalValue, &o.RenewalUnit, &o.RenewalQuotedPrice, &o.RenewalBaseline, &o.RenewalSubmittedAt, &o.ActivationStartedAt, &o.NonRefundable, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -673,7 +677,7 @@ func (s *Postgres) ClaimDueOrders(ctx context.Context, limit int, now time.Time,
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `SELECT `+orderCols+` FROM orders o WHERE status='active' AND next_poll_at<=$1 ORDER BY next_poll_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, limit)
+	rows, err := tx.Query(ctx, `SELECT `+orderCols+` FROM orders o WHERE status='active' AND renewal_inflight=false AND next_poll_at<=$1 ORDER BY next_poll_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -700,6 +704,249 @@ func (s *Postgres) ClaimDueOrders(ctx context.Context, limit int, now time.Time,
 func (s *Postgres) UpdatePoll(ctx context.Context, id, state string, next time.Time, fail int) error {
 	_, err := s.pool.Exec(ctx, `UPDATE orders SET last_provider_state=$2,next_poll_at=$3,poll_failures=$4,updated_at=now() WHERE id=$1 AND status='active'`, id, state, next, fail)
 	return err
+}
+func (s *Postgres) UpdateOrderExpiresAt(ctx context.Context, id string, expiresAt time.Time) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE orders SET expires_at=$2,updated_at=now() WHERE id=$1 AND status='active'`, id, expiresAt)
+	if err == nil && ct.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return err
+}
+
+const renewalRecordColumns = `id,user_id,order_id,idempotency_key,provider_id,upstream_id,mode,value,unit,quoted_price::float8,provider_baseline,COALESCE(charged_price::float8,0),result_expires_at,status,COALESCE(error_code,''),submitted_at,created_at,updated_at`
+
+func scanRenewalRecord(row pgx.Row) (RenewalRecord, error) {
+	var record RenewalRecord
+	err := row.Scan(
+		&record.ID, &record.UserID, &record.OrderID, &record.IdempotencyKey,
+		&record.ProviderID, &record.UpstreamID, &record.Mode, &record.Value,
+		&record.Unit, &record.QuotedPrice, &record.Baseline, &record.ChargedPrice,
+		&record.ResultExpiresAt, &record.Status, &record.ErrorCode,
+		&record.SubmittedAt, &record.CreatedAt, &record.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = ErrNotFound
+	}
+	return record, err
+}
+
+func (s *Postgres) GetRenewalRequest(ctx context.Context, userID, idempotencyKey string) (RenewalRecord, error) {
+	return scanRenewalRecord(s.pool.QueryRow(ctx,
+		`SELECT `+renewalRecordColumns+` FROM renewal_requests WHERE user_id=$1 AND idempotency_key=$2`,
+		userID, idempotencyKey,
+	))
+}
+
+func (s *Postgres) StartOrderRenewal(ctx context.Context, record RenewalRecord) (RenewalRecord, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RenewalRecord{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx, `INSERT INTO renewal_requests(
+		id,user_id,order_id,idempotency_key,provider_id,upstream_id,mode,value,unit,quoted_price,provider_baseline,status
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'provisioning')
+	ON CONFLICT(user_id,idempotency_key) DO NOTHING`,
+		record.ID, record.UserID, record.OrderID, record.IdempotencyKey,
+		record.ProviderID, record.UpstreamID, record.Mode, record.Value,
+		record.Unit, record.QuotedPrice, record.Baseline,
+	)
+	if unique(err) {
+		return RenewalRecord{}, false, ErrConflict
+	}
+	if err != nil {
+		return RenewalRecord{}, false, err
+	}
+	if ct.RowsAffected() == 0 {
+		existing, getErr := scanRenewalRecord(tx.QueryRow(ctx,
+			`SELECT `+renewalRecordColumns+` FROM renewal_requests WHERE user_id=$1 AND idempotency_key=$2`,
+			record.UserID, record.IdempotencyKey,
+		))
+		return existing, false, getErr
+	}
+	ct, err = tx.Exec(ctx, `UPDATE orders SET
+		renewal_request_id=$2,
+		renewal_inflight=true,
+		renewal_inflight_at=now(),
+		renewal_mode=$3,
+		renewal_value=$4,
+		renewal_unit=$5,
+		renewal_quoted_price=$6,
+		renewal_baseline=$7,
+		renewal_submitted_at=NULL,
+		updated_at=now()
+	WHERE id=$1 AND renewal_inflight=false`,
+		record.OrderID, record.ID, record.Mode, record.Value, record.Unit, record.QuotedPrice, record.Baseline,
+	)
+	if err != nil {
+		return RenewalRecord{}, false, err
+	}
+	if ct.RowsAffected() != 1 {
+		return RenewalRecord{}, false, ErrConflict
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return RenewalRecord{}, false, err
+	}
+	record.Status = "provisioning"
+	return record, true, nil
+}
+
+func (s *Postgres) MarkOrderRenewalSubmitted(ctx context.Context, requestID, orderID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx, `UPDATE renewal_requests SET status='unknown',submitted_at=now(),updated_at=now()
+		WHERE id=$1 AND order_id=$2 AND status='provisioning'`, requestID, orderID)
+	if err != nil || ct.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return false, err
+	}
+	ct, err = tx.Exec(ctx, `UPDATE orders SET renewal_submitted_at=now(),renewal_inflight_at=now(),updated_at=now()
+		WHERE id=$1 AND renewal_request_id=$2 AND renewal_inflight=true AND renewal_submitted_at IS NULL`, orderID, requestID)
+	if err != nil || ct.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Postgres) CompleteOrderRenewal(ctx context.Context, requestID, id, upstreamID, phoneNumber, duration string, expiresAt time.Time, totalCost, chargedPrice float64, activationStartedAt time.Time, nonRefundable bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx, `UPDATE orders SET
+		upstream_id=$3,
+		phone_number=CASE WHEN BTRIM($4)='' THEN phone_number ELSE $4 END,
+		duration=$5,
+		status='active',
+		cost=$7,
+		can_get_another_sms=true,
+		poll_sequence=CASE WHEN upstream_id<>$3 THEN 0 ELSE poll_sequence END,
+		last_provider_state='',
+		next_poll_at=now(),
+		poll_failures=0,
+		request_next_pending=false,
+		request_next_inflight=false,
+		request_next_inflight_at=NULL,
+		request_next_generation=CASE WHEN upstream_id<>$3 THEN 0 ELSE request_next_generation END,
+		request_next_claim_generation=CASE WHEN upstream_id<>$3 THEN 0 ELSE request_next_claim_generation END,
+		request_next_failures=0,
+		expires_at=$6,
+		activation_started_at=$8,
+		non_refundable=$9,
+		renewal_inflight=false,
+		renewal_inflight_at=NULL,
+		renewal_request_id=NULL,
+		renewal_mode='',
+		renewal_value=0,
+		renewal_unit='',
+		renewal_quoted_price=0,
+		renewal_baseline='',
+		renewal_submitted_at=NULL,
+		updated_at=now()
+	WHERE id=$2 AND renewal_request_id=$1 AND renewal_inflight=true AND renewal_submitted_at IS NOT NULL`,
+		requestID, id, upstreamID, phoneNumber, duration, expiresAt, totalCost, activationStartedAt, nonRefundable)
+	if err != nil || ct.RowsAffected() != 1 {
+		if unique(err) {
+			return ErrConflict
+		}
+		if err == nil {
+			err = ErrConflict
+		}
+		return err
+	}
+	ct, err = tx.Exec(ctx, `UPDATE renewal_requests SET
+		status='succeeded',charged_price=$2,result_expires_at=$3,error_code='',updated_at=now()
+	WHERE id=$1 AND order_id=$4 AND status='unknown'`, requestID, chargedPrice, expiresAt, id)
+	if err != nil || ct.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Postgres) ReleaseOrderRenewal(ctx context.Context, requestID, orderID, errorCode string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	ct, err := tx.Exec(ctx, `UPDATE orders SET
+		renewal_inflight=false,
+		renewal_inflight_at=NULL,
+		renewal_request_id=NULL,
+		renewal_mode='',
+		renewal_value=0,
+		renewal_unit='',
+		renewal_quoted_price=0,
+		renewal_baseline='',
+		renewal_submitted_at=NULL,
+		updated_at=now()
+	WHERE id=$1 AND renewal_request_id=$2 AND renewal_inflight=true`, orderID, requestID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	ct, err = tx.Exec(ctx, `UPDATE renewal_requests SET status='failed',error_code=$2,updated_at=now()
+		WHERE id=$1 AND order_id=$3 AND status IN ('provisioning','unknown')`, requestID, errorCode, orderID)
+	if err != nil || ct.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Postgres) ClaimDueRenewals(ctx context.Context, limit int, now time.Time, lease time.Duration) ([]domain.Order, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT `+orderCols+` FROM orders o
+		WHERE renewal_inflight=true AND renewal_submitted_at IS NOT NULL AND renewal_inflight_at<=$1
+		ORDER BY renewal_inflight_at FOR UPDATE SKIP LOCKED LIMIT $2`, now, limit)
+	if err != nil {
+		return nil, err
+	}
+	orders := make([]domain.Order, 0, limit)
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		orders = append(orders, order)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, order := range orders {
+		if _, err = tx.Exec(ctx, `UPDATE orders SET renewal_inflight_at=$2 WHERE id=$1`, order.ID, now.Add(lease)); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return orders, nil
 }
 func (s *Postgres) UpdateRequestNext(ctx context.Context, id string, pending bool, failures int, next time.Time) error {
 	_, err := s.pool.Exec(ctx, `UPDATE orders SET request_next_pending=$2,request_next_failures=$3,next_poll_at=CASE WHEN $2 THEN LEAST(next_poll_at,$4) ELSE next_poll_at END,updated_at=now() WHERE id=$1 AND status='active'`, id, pending, failures, next)
@@ -791,7 +1038,7 @@ SELECT
 	count(*) FILTER (WHERE created_at >= date_trunc('day', now())),
 	COALESCE(sum(cost) FILTER (
 		WHERE created_at >= date_trunc('day', now())
-			AND status <> 'canceled'
+			AND status = 'completed'
 	), 0)::float8,
 	(
 		SELECT count(*)
@@ -823,6 +1070,7 @@ type maintenanceStatement struct {
 
 func maintenanceStatements(now time.Time) []maintenanceStatement {
 	return []maintenanceStatement{
+		{`WITH stale AS (UPDATE renewal_requests SET status='failed',error_code='abandoned_before_submit',updated_at=now() WHERE status='provisioning' AND submitted_at IS NULL AND updated_at<$1 RETURNING id) UPDATE orders SET renewal_request_id=NULL,renewal_inflight=false,renewal_inflight_at=NULL,renewal_mode='',renewal_value=0,renewal_unit='',renewal_quoted_price=0,renewal_baseline='',renewal_submitted_at=NULL,updated_at=now() WHERE renewal_request_id IN (SELECT id FROM stale)`, now.Add(-2 * time.Minute)},
 		{`DELETE FROM captcha_challenges WHERE expires_at<$1`, now.Add(-time.Hour)},
 		{`DELETE FROM captcha_issuances WHERE issued_at<$1`, now.Add(-24 * time.Hour)},
 		{`DELETE FROM auth_sessions WHERE expires_at<$1 OR revoked_at<$1`, now.Add(-7 * 24 * time.Hour)},

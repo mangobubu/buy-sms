@@ -133,11 +133,45 @@ export interface Quote {
   }>
 }
 
+export interface DurationOption {
+  value: string
+  minutes: number
+  hours?: number
+  price: string
+  available: number
+  priceOptions?: Array<{
+    price: string
+    available: number
+  }>
+}
+
+export type RenewalMode = 'prolong' | 'reactivate'
+export type RenewalUnit = 'minute' | 'hour' | 'activation'
+
+export interface RenewalOption {
+  value: number
+  unit: RenewalUnit
+  minutes: number
+  price: string
+  currency: string
+}
+
+export interface RenewalOptions {
+  mode?: RenewalMode
+  options: RenewalOption[]
+}
+
+export interface RenewalPayload {
+  value: number
+  unit: RenewalUnit
+  quotedPrice: string
+}
 export interface PurchasePayload {
   provider: ProviderCode
   countryCode: string
   serviceCode: string
   tier?: SmsBowerTier
+  duration?: string
   maxPrice: string
 }
 
@@ -150,6 +184,7 @@ export interface PurchaseAttempt {
   serviceCode: string
   serviceName?: string
   tier?: SmsBowerTier
+  duration?: string
   maxPrice: string
   status: PurchaseAttemptStatus | string
   errorCode: string
@@ -184,13 +219,21 @@ export interface NumberOrder {
   serviceCode: string
   serviceName?: string
   tier?: SmsBowerTier
+  duration?: string
   phoneNumber: string
   status: OrderStatus | string
   price: string
   currency: string
   messages: SmsMessage[]
+  currentActivationHasMessages?: boolean
+  renewalPending?: boolean
   webhookEnabled?: boolean
   lastPolledAt?: string
+  expiresAt?: string
+  canCancel: boolean
+  cancelAvailableAt?: string
+  cancelWaitSeconds?: number
+  cancelUnavailableReason?: string
   createdAt: string
   updatedAt?: string
 }

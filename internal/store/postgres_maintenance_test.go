@@ -9,6 +9,7 @@ import (
 func TestMaintenanceStatementsUsePrecomputedCutoffs(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 17, 57, 31, 123456789, time.FixedZone("CST", 8*60*60))
 	want := []maintenanceStatement{
+		{`WITH stale AS (UPDATE renewal_requests SET status='failed',error_code='abandoned_before_submit',updated_at=now() WHERE status='provisioning' AND submitted_at IS NULL AND updated_at<$1 RETURNING id) UPDATE orders SET renewal_request_id=NULL,renewal_inflight=false,renewal_inflight_at=NULL,renewal_mode='',renewal_value=0,renewal_unit='',renewal_quoted_price=0,renewal_baseline='',renewal_submitted_at=NULL,updated_at=now() WHERE renewal_request_id IN (SELECT id FROM stale)`, now.Add(-2 * time.Minute)},
 		{`DELETE FROM captcha_challenges WHERE expires_at<$1`, now.Add(-time.Hour)},
 		{`DELETE FROM captcha_issuances WHERE issued_at<$1`, now.Add(-24 * time.Hour)},
 		{`DELETE FROM auth_sessions WHERE expires_at<$1 OR revoked_at<$1`, now.Add(-7 * 24 * time.Hour)},

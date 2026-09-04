@@ -41,6 +41,14 @@ export function formatMoney(value?: string | number, currency = 'USD'): string {
   }
 }
 
+export function formatPurchaseDuration(value?: string): string {
+  const duration = value?.trim() || ''
+  if (!duration) return '标准接码'
+  const hours = Number(duration)
+  if (!Number.isInteger(hours) || hours <= 0) return `时长 ${duration}`
+  return hours % 24 === 0 ? `${hours / 24} 天（${hours} 小时）` : `${hours} 小时`
+}
+
 // E.164 的国际区号为 1～3 位；先匹配完整的一、二位区号，其余有效区号均为三位。
 const singleDigitCallingCodes = new Set(['1', '7'])
 const twoDigitCallingCodes = new Set([

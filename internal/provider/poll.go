@@ -57,12 +57,21 @@ func parseOTPList(payload []byte) ([]OTPMessage, string, *time.Time, error) {
 		seen[message.Fingerprint] = struct{}{}
 		messages = append(messages, message)
 	}
-	if len(messages) > 0 {
+	if len(messages) > 0 && !isTerminalPollState(state) {
 		state = PollReceived
 	} else if state == "" || state == PollUnknown {
 		state = PollWaiting
 	}
 	return messages, state, expiresAt, nil
+}
+
+func isTerminalPollState(state string) bool {
+	switch state {
+	case PollCompleted, PollCanceled, PollExpired, PollRefunded:
+		return true
+	default:
+		return false
+	}
 }
 
 func collectMessageObjects(value any, output *[]map[string]any, insideMessageList bool) {

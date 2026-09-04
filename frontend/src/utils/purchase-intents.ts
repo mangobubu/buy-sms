@@ -62,6 +62,7 @@ export interface PurchaseSignatureFields {
   serviceCode: string
   tier?: string
   countryCode: string
+  duration?: string
   maxPrice: string
 }
 
@@ -71,6 +72,7 @@ export function createPurchaseSignature(fields: PurchaseSignatureFields): string
     serviceCode: fields.serviceCode,
     tier: fields.tier || undefined,
     countryCode: fields.countryCode,
+    duration: fields.duration?.trim() || undefined,
     maxPrice: fields.maxPrice.trim(),
   })
 }
@@ -94,6 +96,7 @@ export function normalizePurchaseSignature(signature: string): string {
       serviceCode: parsed.serviceCode,
       tier: typeof parsed.tier === 'string' ? parsed.tier : undefined,
       countryCode: parsed.countryCode,
+      duration: typeof parsed.duration === 'string' ? parsed.duration : undefined,
       maxPrice: parsed.maxPrice,
     })
   } catch {

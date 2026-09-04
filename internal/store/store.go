@@ -55,6 +55,13 @@ type Repository interface {
 	SetOrderStatus(context.Context, string, string, string) error
 	ClaimDueOrders(context.Context, int, time.Time, time.Duration) ([]domain.Order, error)
 	UpdatePoll(context.Context, string, string, time.Time, int) error
+	UpdateOrderExpiresAt(context.Context, string, time.Time) error
+	GetRenewalRequest(context.Context, string, string) (RenewalRecord, error)
+	StartOrderRenewal(context.Context, RenewalRecord) (RenewalRecord, bool, error)
+	MarkOrderRenewalSubmitted(context.Context, string, string) (bool, error)
+	CompleteOrderRenewal(context.Context, string, string, string, string, string, time.Time, float64, float64, time.Time, bool) error
+	ReleaseOrderRenewal(context.Context, string, string, string) error
+	ClaimDueRenewals(context.Context, int, time.Time, time.Duration) ([]domain.Order, error)
 	UpdateRequestNext(context.Context, string, bool, int, time.Time) error
 	ClaimRequestNext(context.Context, string) (bool, error)
 	RestoreRequestNext(context.Context, string, int, time.Time) error
@@ -68,10 +75,19 @@ type Repository interface {
 	Close()
 }
 
+type RenewalRecord struct {
+	ID, UserID, OrderID, IdempotencyKey, ProviderID, UpstreamID string
+	Mode, Unit, Status, ErrorCode                               string
+	Baseline                                                    string
+	Value                                                       int
+	QuotedPrice, ChargedPrice                                   float64
+	ResultExpiresAt, SubmittedAt                                *time.Time
+	CreatedAt, UpdatedAt                                        time.Time
+}
 type PurchaseRecord struct {
-	ID, UserID, IdempotencyKey, ProviderID, CountryCode, CountryName, ServiceCode, ServiceName, QualityTier, Status, OrderID, ErrorCode string
-	MaxPrice                                                                                                                            float64
-	CreatedAt, UpdatedAt                                                                                                                time.Time
+	ID, UserID, IdempotencyKey, ProviderID, CountryCode, CountryName, ServiceCode, ServiceName, QualityTier, Duration, Status, OrderID, ErrorCode string
+	MaxPrice                                                                                                                                      float64
+	CreatedAt, UpdatedAt                                                                                                                          time.Time
 }
 
 type WebhookRecord struct {

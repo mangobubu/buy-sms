@@ -18,31 +18,43 @@ type maintenanceContract interface {
 type orderNameSnapshotRow struct{}
 
 func (orderNameSnapshotRow) Scan(dest ...any) error {
-	if len(dest) != 27 {
-		return fmt.Errorf("订单扫描列数=%d，期望 27", len(dest))
+	if len(dest) != 39 {
+		return fmt.Errorf("订单扫描列数=%d，期望 39", len(dest))
 	}
 	*dest[5].(*string) = "10"
 	*dest[6].(*string) = "目录国家名称"
 	*dest[7].(*string) = "hc"
 	*dest[8].(*string) = "MOMO"
 	*dest[9].(*string) = "gold"
+	*dest[10].(*string) = "24"
+	*dest[25].(*string) = "renewal-request-1"
+	*dest[28].(*string) = "prolong"
+	*dest[29].(*int) = 24
+	*dest[30].(*string) = "hour"
+	*dest[31].(*float64) = 1.25
+	*dest[32].(*string) = "{}"
+	*dest[34].(*time.Time) = time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+	*dest[35].(*bool) = true
 	return nil
 }
-
 func TestOrderNameSnapshotsAreIncludedInInsertAndScanContracts(t *testing.T) {
 	order := domain.Order{
 		CountryCode: "10", CountryName: "目录国家名称",
-		ServiceCode: "hc", ServiceName: "MOMO", QualityTier: "gold",
+		ServiceCode: "hc", ServiceName: "MOMO", QualityTier: "gold", Duration: "24",
+		CreatedAt: time.Date(2026, 9, 4, 8, 0, 0, 0, time.UTC),
 	}
 	args := orderInsertArgs(order)
-	if len(args) != 16 {
-		t.Fatalf("订单写入参数数=%d，期望 16", len(args))
+	if len(args) != 18 {
+		t.Fatalf("订单写入参数数=%d，期望 18", len(args))
 	}
-	if args[5] != "10" || args[6] != "目录国家名称" || args[7] != "hc" || args[8] != "MOMO" || args[9] != "gold" {
-		t.Fatalf("订单名称快照或档位参数顺序错误: %#v", args[5:10])
+	if args[5] != "10" || args[6] != "目录国家名称" || args[7] != "hc" || args[8] != "MOMO" || args[9] != "gold" || args[10] != "24" {
+		t.Fatalf("订单名称快照、档位或时长参数顺序错误: %#v", args[5:11])
+	}
+	if args[17] != order.CreatedAt {
+		t.Fatalf("订单购买发起时间参数错误: %#v", args[17])
 	}
 
-	const readableColumns = "o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier"
+	const readableColumns = "o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.duration"
 	if !strings.Contains(orderCols, readableColumns) {
 		t.Fatalf("订单读取列未完整包含名称快照: %s", orderCols)
 	}
@@ -50,13 +62,19 @@ func TestOrderNameSnapshotsAreIncludedInInsertAndScanContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned.CountryName != "目录国家名称" || scanned.ServiceName != "MOMO" || scanned.QualityTier != "gold" {
+	if scanned.CountryName != "目录国家名称" || scanned.ServiceName != "MOMO" || scanned.QualityTier != "gold" || scanned.Duration != "24" {
 		t.Fatalf("订单扫描结果错误: %+v", scanned)
 	}
-
+	if scanned.RenewalRequestID != "renewal-request-1" || scanned.RenewalBaseline != "{}" || scanned.RenewalMode != "prolong" || scanned.RenewalValue != 24 || scanned.RenewalUnit != "hour" || scanned.RenewalQuotedPrice != 1.25 {
+		t.Fatalf("订单续期认领上下文扫描错误: %+v", scanned)
+	}
+	if scanned.ActivationStartedAt.IsZero() || !scanned.NonRefundable {
+		t.Fatalf("订单当前激活周期扫描错误: %+v", scanned)
+	}
 	insert := strings.ToLower(insertOrderSQL)
 	for _, fragment := range []string{
-		"country_code,country_name,service_code,service_name,quality_tier",
+		"country_code,country_name,service_code,service_name,quality_tier,duration",
+		"expires_at,created_at",
 		"pc.kind = 'country'",
 		"pc.kind = 'service'",
 		"pc.country in ($6, '')",
@@ -76,6 +94,8 @@ func TestOrderNameMigrationAndCatalogBackfillContracts(t *testing.T) {
 	for _, fragment := range []string{
 		"alter table orders add column if not exists country_name text",
 		"alter table orders add column if not exists service_name text",
+		"alter table orders add column if not exists duration text not null default ''",
+		"alter table purchase_requests add column if not exists duration text not null default ''",
 		"update orders as o",
 		"pc.kind = 'country'",
 		"pc.kind = 'service'",
@@ -137,10 +157,10 @@ func TestPurchaseAttemptNamesUseProviderCatalogContract(t *testing.T) {
 	}
 }
 
-func TestDashboardTodayCostExcludesCanceledOrders(t *testing.T) {
+func TestDashboardTodayCostIncludesOnlyCompletedOrders(t *testing.T) {
 	query := strings.Join(strings.Fields(strings.ToLower(dashboardSQL)), " ")
-	if !strings.Contains(query, "sum(cost) filter ( where created_at >= date_trunc('day', now()) and status <> 'canceled' )") {
-		t.Fatalf("今日支出 SQL 未排除取消号码: %s", query)
+	if !strings.Contains(query, "sum(cost) filter ( where created_at >= date_trunc('day', now()) and status = 'completed' )") {
+		t.Fatalf("今日支出 SQL 未限定为已完成订单: %s", query)
 	}
 }
 
@@ -166,4 +186,100 @@ func TestMaintenanceSchemaContractCoversEveryRetainedDataset(t *testing.T) {
 		}
 	}
 
+}
+func TestMaintenanceOnlyReleasesUnsubmittedRenewalClaims(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	statements := maintenanceStatements(now)
+	for _, statement := range statements {
+		query := strings.Join(strings.Fields(strings.ToLower(statement.query)), " ")
+		if !strings.Contains(query, "update renewal_requests set status='failed'") {
+			continue
+		}
+		for _, fragment := range []string{
+			"status='provisioning'", "submitted_at is null", "updated_at<$1",
+			"update orders set renewal_request_id=null", "renewal_inflight=false",
+			"renewal_request_id in (select id from stale)",
+		} {
+			if !strings.Contains(query, fragment) {
+				t.Fatalf("续期认领回收缺少流水/订单原子约束 %q: %s", fragment, query)
+			}
+		}
+		if !statement.cutoff.Equal(now.Add(-2 * time.Minute)) {
+			t.Fatalf("未提交续期认领回收时间=%v", statement.cutoff)
+		}
+		return
+	}
+	t.Fatal("维护任务缺少未提交续期流水与订单认领的原子回收")
+}
+func TestOrderLifecycleColumnsBelongOnlyToOrders(t *testing.T) {
+	migration, err := os.ReadFile("../../migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := strings.ToLower(string(migration))
+	authStart := strings.Index(schema, "create table if not exists auth_sessions")
+	authEnd := strings.Index(schema[authStart:], ");")
+	ordersStart := strings.Index(schema, "create table if not exists orders")
+	ordersEnd := strings.Index(schema[ordersStart:], ");")
+	if authStart < 0 || authEnd < 0 || ordersStart < 0 || ordersEnd < 0 {
+		t.Fatal("迁移缺少 auth_sessions 或 orders 表定义")
+	}
+	authTable := schema[authStart : authStart+authEnd]
+	ordersTable := schema[ordersStart : ordersStart+ordersEnd]
+	for _, column := range []string{"activation_started_at", "non_refundable"} {
+		if strings.Contains(authTable, column) {
+			t.Fatalf("生命周期字段 %s 被误加到 auth_sessions", column)
+		}
+		if !strings.Contains(ordersTable, column) {
+			t.Fatalf("orders 新建定义缺少生命周期字段 %s", column)
+		}
+	}
+	if strings.Count(schema, "alter table orders add column if not exists activation_started_at") != 1 ||
+		strings.Count(schema, "alter table orders add column if not exists non_refundable") != 1 {
+		t.Fatal("订单生命周期 ALTER 迁移存在重复或缺失")
+	}
+}
+func TestRenewalRequestMigrationProvidesPersistentIdempotency(t *testing.T) {
+	migration, err := os.ReadFile("../../migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := strings.Join(strings.Fields(strings.ToLower(string(migration))), " ")
+	for _, fragment := range []string{
+		"create table if not exists renewal_requests",
+		"idempotency_key text not null",
+		"status text not null check(status in ('provisioning','unknown','succeeded','failed'))",
+		"unique(user_id,idempotency_key)",
+		"create unique index if not exists renewal_requests_order_pending on renewal_requests(order_id) where status in ('provisioning','unknown')",
+		"alter table orders add column if not exists renewal_request_id uuid",
+	} {
+		if !strings.Contains(schema, fragment) {
+			t.Fatalf("续期幂等迁移缺少约束 %q", fragment)
+		}
+	}
+}
+
+func TestRenewalRepositorySQLKeepsRequestAndOrderTransitionsAtomic(t *testing.T) {
+	// 生产实现中的 Start/Mark/Complete/Release 都显式开启事务；这里以源码
+	// 契约锁定关键状态条件，避免未来把资金流水和订单更新拆开。
+	implementation, err := os.ReadFile("postgres.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.Join(strings.Fields(strings.ToLower(string(implementation))), " ")
+	for _, fragment := range []string{
+		"func (s *postgres) startorderrenewal",
+		"status='provisioning'",
+		"func (s *postgres) markorderrenewalsubmitted",
+		"status='unknown'",
+		"func (s *postgres) completeorderrenewal",
+		"status='succeeded'",
+		"func (s *postgres) releaseorderrenewal",
+		"status='failed'",
+		"renewal_request_id=$2",
+	} {
+		if !strings.Contains(source, fragment) {
+			t.Fatalf("续期流水原子状态实现缺少约束 %q", fragment)
+		}
+	}
 }

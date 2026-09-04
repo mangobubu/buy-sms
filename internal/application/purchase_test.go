@@ -152,6 +152,7 @@ func requirePurchaseError(t *testing.T, err error, code, message string) *Purcha
 func TestPurchaseErrorKeepsUncertainFailuresDistinct(t *testing.T) {
 	definiteFailureCodes := map[string]bool{
 		"configuration":            true,
+		"duration_unavailable":     true,
 		"insufficient_balance":     true,
 		"invalid_selection":        true,
 		"no_numbers":               true,
@@ -231,6 +232,10 @@ func TestClassifyProviderPurchasePreflightErrorsAsFailed(t *testing.T) {
 		{"目录 HTTP 5xx", "catalog.services", "UPSTREAM_ERROR", "provider_preflight_error", http.StatusServiceUnavailable},
 		{"等级暂无号码", "purchase.tier", "NO_NUMBERS", "no_numbers", 0},
 		{"目录服务无效", "catalog.services", "BAD_SERVICE", "invalid_selection", 0},
+		{"长租目录时长无效", "catalog.duration.rent", "BAD_DURATION", "duration_unavailable", 0},
+		{"长租购买时长失效", "purchase", "BAD_DURATION", "duration_unavailable", http.StatusUnprocessableEntity},
+		{"长租国家无效", "catalog.duration.rent", "WRONG_COUNTRY", "invalid_selection", 0},
+		{"长租服务无效", "catalog.duration.rent", "WRONG_SERVICE", "invalid_selection", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

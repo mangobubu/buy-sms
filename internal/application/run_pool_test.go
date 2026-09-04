@@ -27,6 +27,23 @@ type runPoolRepository struct {
 	updated   chan string
 }
 
+func (r *runPoolRepository) WithOrderLock(ctx context.Context, _ string, callback func(context.Context) error) error {
+	return callback(ctx)
+}
+
+func (r *runPoolRepository) GetOrder(_ context.Context, id, _ string) (domain.Order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, order := range r.due {
+		if order.ID == id {
+			return order, nil
+		}
+	}
+	return domain.Order{}, store.ErrNotFound
+}
+func (r *runPoolRepository) ClaimDueRenewals(context.Context, int, time.Time, time.Duration) ([]domain.Order, error) {
+	return []domain.Order{}, nil
+}
 func (r *runPoolRepository) ClaimDueOrders(context.Context, int, time.Time, time.Duration) ([]domain.Order, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

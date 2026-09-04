@@ -80,6 +80,7 @@ type Order struct {
 	ServiceCode                string       `json:"serviceCode"`
 	ServiceName                string       `json:"serviceName,omitempty"`
 	QualityTier                string       `json:"tier,omitempty"`
+	Duration                   string       `json:"duration,omitempty"`
 	Status                     string       `json:"status"`
 	Cost                       float64      `json:"cost"`
 	Currency                   string       `json:"currency"`
@@ -94,6 +95,17 @@ type Order struct {
 	RequestNextGeneration      int64        `json:"-"`
 	RequestNextClaimGeneration int64        `json:"-"`
 	RequestNextFailures        int          `json:"-"`
+	RenewalRequestID           string       `json:"-"`
+	RenewalInflight            bool         `json:"-"`
+	RenewalInflightAt          *time.Time   `json:"-"`
+	RenewalMode                string       `json:"-"`
+	RenewalValue               int          `json:"-"`
+	RenewalUnit                string       `json:"-"`
+	RenewalQuotedPrice         float64      `json:"-"`
+	RenewalBaseline            string       `json:"-"`
+	RenewalSubmittedAt         *time.Time   `json:"-"`
+	ActivationStartedAt        time.Time    `json:"-"`
+	NonRefundable              bool         `json:"-"`
 	ExpiresAt                  *time.Time   `json:"expiresAt,omitempty"`
 	CreatedAt                  time.Time    `json:"createdAt"`
 	UpdatedAt                  time.Time    `json:"updatedAt"`

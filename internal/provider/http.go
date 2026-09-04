@@ -92,7 +92,8 @@ func (c *baseClient) do(ctx context.Context, operation, method string, endpoint 
 		if code == "" {
 			code = http.StatusText(response.StatusCode)
 		}
-		return nil, response.StatusCode, c.failure(operation, code, response.StatusCode, response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500, nil)
+		retryable := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 || strings.EqualFold(code, CodeCancelNotAvailableYet)
+		return nil, response.StatusCode, c.failure(operation, code, response.StatusCode, retryable, nil)
 	}
 	return payload, response.StatusCode, nil
 }
@@ -113,6 +114,18 @@ func (c *baseClient) get(ctx context.Context, operation, apiKey, relative string
 	}
 	u.RawQuery = query.Encode()
 	payload, _, err := c.do(ctx, operation, http.MethodGet, u, headers, nil, apiKey)
+	return payload, err
+}
+
+func (c *baseClient) publicGet(ctx context.Context, operation, relative string, query url.Values) ([]byte, error) {
+	u, err := c.endpoint(relative)
+	if err != nil {
+		return nil, c.failure(operation, "INVALID_BASE_URL", 0, false, nil)
+	}
+	if query != nil {
+		u.RawQuery = query.Encode()
+	}
+	payload, _, err := c.do(ctx, operation, http.MethodGet, u, nil, nil)
 	return payload, err
 }
 
@@ -173,6 +186,9 @@ func safeCodeFromBody(payload []byte, secrets ...string) string {
 	decoder.UseNumber()
 	if decoder.Decode(&value) == nil {
 		if object, ok := value.(map[string]any); ok {
+			if smsPoolCancelNotAvailable(object) {
+				return CodeCancelNotAvailableYet
+			}
 			for _, key := range []string{"code", "type", "error", "title", "status"} {
 				if raw, found := lookup(object, key); found {
 					if code := sanitizeCodeWithoutSecrets(stringValue(raw), secrets...); code != "" {

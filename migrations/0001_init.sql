@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS orders (
     service_code text NOT NULL,
     service_name text,
     quality_tier text NOT NULL DEFAULT '',
+    duration text NOT NULL DEFAULT '',
     status text NOT NULL CHECK (status IN ('active','completed','canceled','expired')),
     cost numeric(18,6) NOT NULL DEFAULT 0,
     currency text NOT NULL DEFAULT 'USD',
@@ -96,6 +97,17 @@ CREATE TABLE IF NOT EXISTS orders (
     request_next_generation bigint NOT NULL DEFAULT 0,
     request_next_claim_generation bigint NOT NULL DEFAULT 0,
     request_next_failures integer NOT NULL DEFAULT 0,
+    renewal_request_id uuid,
+    renewal_inflight boolean NOT NULL DEFAULT false,
+    renewal_inflight_at timestamptz,
+    renewal_mode text NOT NULL DEFAULT '',
+    renewal_value integer NOT NULL DEFAULT 0,
+    renewal_unit text NOT NULL DEFAULT '',
+    renewal_quoted_price numeric(18,6) NOT NULL DEFAULT 0,
+    renewal_baseline text NOT NULL DEFAULT '',
+    renewal_submitted_at timestamptz,
+    activation_started_at timestamptz NOT NULL DEFAULT now(),
+    non_refundable boolean NOT NULL DEFAULT false,
     expires_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -108,6 +120,21 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_inflight_at timestamptz
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_next_claim_generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS duration text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_request_id uuid;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_inflight boolean NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_inflight_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_mode text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_value integer NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_unit text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_quoted_price numeric(18,6) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_baseline text NOT NULL DEFAULT '';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS renewal_submitted_at timestamptz;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS activation_started_at timestamptz;
+UPDATE orders SET activation_started_at=created_at WHERE activation_started_at IS NULL;
+ALTER TABLE orders ALTER COLUMN activation_started_at SET DEFAULT now();
+ALTER TABLE orders ALTER COLUMN activation_started_at SET NOT NULL;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS non_refundable boolean NOT NULL DEFAULT false;
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -174,6 +201,31 @@ WHERE (
 CREATE INDEX IF NOT EXISTS orders_poll_due ON orders(next_poll_at) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS orders_user_created ON orders(user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS renewal_requests (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    order_id uuid NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    idempotency_key text NOT NULL,
+    provider_id text NOT NULL REFERENCES providers(id),
+    upstream_id text NOT NULL,
+    mode text NOT NULL CHECK(mode IN ('prolong','reactivate')),
+    value integer NOT NULL CHECK(value > 0),
+    unit text NOT NULL CHECK(unit IN ('minute','hour','activation')),
+    quoted_price numeric(18,6) NOT NULL CHECK(quoted_price >= 0),
+    provider_baseline text NOT NULL DEFAULT '',
+    charged_price numeric(18,6),
+    result_expires_at timestamptz,
+    status text NOT NULL CHECK(status IN ('provisioning','unknown','succeeded','failed')),
+    error_code text NOT NULL DEFAULT '',
+    submitted_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE(user_id,idempotency_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS renewal_requests_order_pending
+    ON renewal_requests(order_id) WHERE status IN ('provisioning','unknown');
+CREATE INDEX IF NOT EXISTS renewal_requests_order_created
+    ON renewal_requests(order_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS purchase_requests (
     id uuid PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id),
@@ -182,6 +234,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     country_code text NOT NULL,
     service_code text NOT NULL,
     quality_tier text NOT NULL DEFAULT '',
+    duration text NOT NULL DEFAULT '',
     max_price numeric(18,6) NOT NULL,
     status text NOT NULL CHECK(status IN ('provisioning','succeeded','unknown','failed')),
     order_id uuid REFERENCES orders(id),
@@ -191,6 +244,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     UNIQUE(user_id,idempotency_key)
 );
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS duration text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS purchase_requests_user_created ON purchase_requests(user_id, created_at DESC);
 DO $$
 BEGIN

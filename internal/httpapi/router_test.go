@@ -28,6 +28,8 @@ func TestProtectedAPIRoutesRejectMissingAuthentication(t *testing.T) {
 		"/api/dashboard",
 		"/api/providers",
 		"/api/providers/balances",
+		"/api/orders/order-1/renewal-options",
+		"/api/catalog/durations?provider=herosms&country=2&service=tg",
 		"/api/orders",
 		"/api/users",
 	} {
@@ -360,7 +362,7 @@ func TestOperatorDashboardOnlyContainsOwnOrdersAndMessages(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &dashboard); err != nil {
 		t.Fatal(err)
 	}
-	if dashboard.ActiveOrders != 1 || dashboard.TodayOrders != 1 || dashboard.TodayMessages != 1 || dashboard.TodaySpend != "1.25" {
+	if dashboard.ActiveOrders != 1 || dashboard.TodayOrders != 1 || dashboard.TodayMessages != 1 || dashboard.TodaySpend != "0" {
 		t.Fatalf("operator 统计未按用户隔离: %+v", dashboard)
 	}
 	if len(dashboard.RecentOrders) != 1 || dashboard.RecentOrders[0].ID != "own-order" || dashboard.RecentOrders[0].PhoneNumber != "+15550001111" {
@@ -374,7 +376,7 @@ func TestOperatorDashboardOnlyContainsOwnOrdersAndMessages(t *testing.T) {
 	}
 }
 
-func TestDashboardTodaySpendExcludesCanceledOrders(t *testing.T) {
+func TestDashboardTodaySpendIncludesOnlyCompletedOrders(t *testing.T) {
 	repo := newMemoryRepository()
 	router, _, _ := newTestRouter(t, repo)
 	operator := domain.User{ID: "operator-1", Username: "operator", Role: "operator", Active: true}
@@ -387,6 +389,14 @@ func TestDashboardTodaySpendExcludesCanceledOrders(t *testing.T) {
 	repo.putOrder(domain.Order{
 		ID: "canceled-order", UserID: operator.ID, ProviderID: domain.ProviderHeroSMS,
 		Status: domain.OrderCanceled, Cost: 8.75, Currency: "USD", CreatedAt: now, UpdatedAt: now,
+	})
+	repo.putOrder(domain.Order{
+		ID: "expired-order", UserID: operator.ID, ProviderID: domain.ProviderHeroSMS,
+		Status: domain.OrderExpired, Cost: 4.5, Currency: "USD", CreatedAt: now, UpdatedAt: now,
+	})
+	repo.putOrder(domain.Order{
+		ID: "completed-order", UserID: operator.ID, ProviderID: domain.ProviderHeroSMS,
+		Status: domain.OrderCompleted, Cost: 2.5, Currency: "USD", CreatedAt: now, UpdatedAt: now,
 	})
 
 	response := performAuthenticatedRequest(router, http.MethodGet, "/api/dashboard", "operator-token")
@@ -401,8 +411,8 @@ func TestDashboardTodaySpendExcludesCanceledOrders(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &dashboard); err != nil {
 		t.Fatal(err)
 	}
-	if dashboard.ActiveOrders != 1 || dashboard.TodayOrders != 2 || dashboard.TodaySpend != "1.25" {
-		t.Fatalf("取消号码不应计入今日支出，实际统计: %+v", dashboard)
+	if dashboard.ActiveOrders != 1 || dashboard.TodayOrders != 4 || dashboard.TodaySpend != "2.5" {
+		t.Fatalf("今日支出应仅统计已完成订单，实际统计: %+v", dashboard)
 	}
 }
 

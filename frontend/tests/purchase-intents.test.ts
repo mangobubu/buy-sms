@@ -11,11 +11,18 @@ import {
   type PurchaseIntentLockManager,
   type PurchaseIntentStorage,
 } from '../src/utils/purchase-intents.ts'
-import { formatMoney } from '../src/utils/format.ts'
+import { formatMoney, formatPurchaseDuration } from '../src/utils/format.ts'
 
 test('金额格式保留 HeroSMS 的四位报价精度', () => {
   assert.match(formatMoney('0.0957', 'USD'), /0\.0957/)
   assert.match(formatMoney('1', 'USD'), /1\.00$/)
+})
+
+test('HeroSMS 订单时长按标准接码、小时和天展示', () => {
+  assert.equal(formatPurchaseDuration(), '标准接码')
+  assert.equal(formatPurchaseDuration('12'), '12 小时')
+  assert.equal(formatPurchaseDuration('24'), '1 天（24 小时）')
+  assert.equal(formatPurchaseDuration('72'), '3 天（72 小时）')
 })
 
 class MemoryStorage implements PurchaseIntentStorage {
@@ -136,6 +143,55 @@ test('历史字段顺序的签名迁移后仍复用原幂等键', () => {
 
   assert.equal(store.getOrCreate('purchase-intent:user-1', currentSignature), 'legacy-key')
   assert.equal(Object.keys(store.read('purchase-intent:user-1')).length, 1)
+})
+
+test('默认时长保持历史签名兼容，自定义时长使用独立幂等键', () => {
+  const legacySignature =
+    '{"provider":"herosms","countryCode":"84","serviceCode":"momo","maxPrice":"0.09"}'
+  const defaultSignature = createPurchaseSignature({
+    provider: 'herosms',
+    serviceCode: 'momo',
+    countryCode: '84',
+    duration: '',
+    maxPrice: '0.09',
+  })
+  const oneDaySignature = createPurchaseSignature({
+    provider: 'herosms',
+    serviceCode: 'momo',
+    countryCode: '84',
+    duration: '24',
+    maxPrice: '2.5',
+  })
+  const threeDaySignature = createPurchaseSignature({
+    provider: 'herosms',
+    serviceCode: 'momo',
+    countryCode: '84',
+    duration: '72',
+    maxPrice: '6.8',
+  })
+
+  assert.equal(normalizePurchaseSignature(legacySignature), defaultSignature)
+  assert.notEqual(defaultSignature, oneDaySignature)
+  assert.notEqual(oneDaySignature, threeDaySignature)
+  assert.match(oneDaySignature, /"duration":"24"/)
+})
+
+test('签名会规范化时长空白且保留非空动态时长', () => {
+  const normalized = createPurchaseSignature({
+    provider: 'herosms',
+    serviceCode: 'tg',
+    countryCode: '2',
+    duration: ' 168 ',
+    maxPrice: ' 9.25 ',
+  })
+
+  assert.deepEqual(JSON.parse(normalized), {
+    provider: 'herosms',
+    serviceCode: 'tg',
+    countryCode: '2',
+    duration: '168',
+    maxPrice: '9.25',
+  })
 })
 
 test('新版主存储与旧标签页用户级会话键冲突时阻止提交', () => {

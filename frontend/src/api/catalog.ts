@@ -1,5 +1,12 @@
 import { http, unwrap } from './http'
-import type { CountryOption, ProviderCode, Quote, ServiceOption, SmsBowerTier } from '@/types/api'
+import type {
+  CountryOption,
+  DurationOption,
+  ProviderCode,
+  Quote,
+  ServiceOption,
+  SmsBowerTier,
+} from '@/types/api'
 
 export const catalogApi = {
   services: (provider: ProviderCode) =>
@@ -11,5 +18,9 @@ export const catalogApi = {
   quote: (provider: ProviderCode, country: string, service: string, tier?: SmsBowerTier) =>
     http.get<Quote>('/catalog/quote', {
       params: { provider, country, service, ...(tier ? { tier } : {}) },
+    }).then(unwrap),
+  durations: (provider: ProviderCode, country: string, service: string) =>
+    http.get<DurationOption[]>('/catalog/durations', {
+      params: { provider, country, service },
     }).then(unwrap),
 }

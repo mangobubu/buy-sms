@@ -919,6 +919,20 @@ code {
   font-size: 10px;
 }
 
+.recent-order-timing {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.recent-order-timing time {
+  color: #929baa;
+  font-size: 8px;
+  white-space: nowrap;
+}
+
 .message-count {
   color: #69758a;
   font-size: 10px;
@@ -1551,10 +1565,132 @@ code {
   font-size: 10px;
 }
 
-.order-actions {
+.order-countdown {
+  display: inline-flex;
+  align-items: center;
+  min-width: 112px;
+  gap: 5px;
+  color: #31765f;
+  font-size: 9px;
   white-space: nowrap;
 }
 
+.order-countdown .el-icon {
+  color: #23a278;
+  font-size: 13px;
+}
+
+.order-countdown strong {
+  color: #1d7659;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.order-countdown.is-expired,
+.order-countdown.is-confirming,
+.order-countdown.is-ended,
+.order-countdown.is-unknown,
+.order-countdown.is-expired .el-icon,
+.order-countdown.is-confirming .el-icon,
+.order-countdown.is-ended .el-icon,
+.order-countdown.is-unknown .el-icon,
+.order-countdown.is-expired strong,
+.order-countdown.is-confirming strong,
+.order-countdown.is-ended strong,
+.order-countdown.is-unknown strong {
+  color: #929cab;
+}
+
+.order-actions {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.order-action-buttons {
+  white-space: nowrap;
+}
+
+.cancel-hint {
+  display: block;
+  overflow: hidden;
+  width: 100%;
+  color: #929cab;
+  font-size: 9px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renewal-dialog-content {
+  display: grid;
+  gap: 18px;
+}
+
+.renewal-target {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  gap: 10px;
+  background: #f4fbf8;
+  border: 1px solid #e0f1eb;
+  border-radius: 10px;
+}
+
+.renewal-target > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.renewal-target strong {
+  color: #263855;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 15px;
+}
+
+.renewal-target small {
+  overflow: hidden;
+  color: #8490a2;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.renewal-option-list {
+  display: grid;
+  width: 100%;
+  gap: 9px;
+}
+
+.renewal-option-list .el-radio.is-bordered {
+  display: flex;
+  width: 100%;
+  height: auto;
+  min-height: 46px;
+  margin: 0;
+  padding: 10px 13px;
+}
+
+.renewal-option-list .el-radio__label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+}
+
+.renewal-option-list .el-radio__label strong {
+  color: #148160;
+  font-size: 13px;
+}
+
+.renewal-option-label {
+  color: #34445e;
+  font-size: 12px;
+}
 .order-expand {
   padding: 18px 70px 24px;
 }
@@ -2055,6 +2191,33 @@ code {
     border-bottom: 1px solid #eef1f5;
   }
 
+  .mobile-order-countdown {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 15px;
+    color: #8792a4;
+    font-size: 9px;
+    background: #f4fbf8;
+    border-top: 1px solid #e4f2ed;
+  }
+
+  .mobile-order-countdown .order-countdown {
+    min-width: 0;
+  }
+
+  .recent-order .order-countdown {
+    min-width: 0;
+  }
+
+  .recent-order .order-countdown > span {
+    display: none;
+  }
+
+  .recent-order-timing time {
+    display: none;
+  }
+
   .mobile-order-meta span:nth-child(2) { text-align: center; }
   .mobile-order-meta span:last-child { text-align: right; }
 
@@ -2067,6 +2230,13 @@ code {
 
   .mobile-number-actions > .el-button:last-child {
     margin-left: auto;
+  }
+
+  .mobile-cancel-hint {
+    margin: -3px 15px 9px;
+    color: #929cab;
+    font-size: 9px;
+    line-height: 1.45;
   }
 
   .mobile-sms-list {

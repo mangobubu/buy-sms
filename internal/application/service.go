@@ -84,6 +84,8 @@ func purchaseError(code string, cause error) *PurchaseError {
 		err.Message, err.Kind = "供应商账户余额不足，请联系管理员充值", ErrProvider
 	case "invalid_selection":
 		err.Message, err.Kind = "供应商不支持所选国家或服务，请重新选择", ErrBadRequest
+	case "duration_unavailable":
+		err.Message, err.Kind = "所选购买时长已不可用，请刷新时长后重新选择", ErrConflict
 	case "provider_rate_limited":
 		err.Message, err.Kind = "供应商请求过于频繁，请稍后重试", ErrProvider
 	case "provider_disabled":
@@ -219,6 +221,10 @@ func New(repo store.Repository, authentication *auth.Service, vault *secure.Vaul
 		balanceCache: make(map[string]providerBalanceCacheEntry), balanceCalls: make(map[string]*providerBalanceCall),
 		balanceEpoch: make(map[string]uint64),
 	}
+}
+
+func (s *Service) orderView(order domain.Order, webhookEnabled bool) OrderDTO {
+	return OrderView(order, webhookEnabled, s.now())
 }
 
 func (s *Service) Bootstrap(ctx context.Context) error {
@@ -585,6 +591,77 @@ func (s *Service) Quote(ctx context.Context, pid, country, service, tier string)
 	return QuoteDTO{}, ErrNotFound
 }
 
+func (s *Service) Durations(ctx context.Context, pid, country, service string) ([]DurationOptionDTO, error) {
+	pid = domain.NormalizeProvider(pid)
+	country = strings.TrimSpace(country)
+	service = strings.TrimSpace(service)
+	if pid != domain.ProviderHeroSMS || country == "" || service == "" {
+		return nil, ErrBadRequest
+	}
+	p, key, client, err := s.providerClient(ctx, pid)
+	if err != nil {
+		return nil, err
+	}
+	if !p.Enabled {
+		return nil, ErrConflict
+	}
+	durationClient, ok := client.(provider.DurationCatalogClient)
+	if !ok {
+		return nil, ErrBadRequest
+	}
+	request := provider.CatalogRequest{Country: country, Service: service}
+	options, err := durationClient.Durations(ctx, key, request)
+	if err != nil {
+		return nil, ErrProvider
+	}
+	priceItems, priceErr := client.Catalog(ctx, key, provider.CatalogRequest{
+		Kind: provider.CatalogPrice, Country: country, Service: service,
+	})
+	var ordinary *domain.CatalogItem
+	if priceErr == nil {
+		for index := range priceItems {
+			item := &priceItems[index]
+			if item.Code == service && (item.Country == "" || item.Country == country) {
+				ordinary = item
+				break
+			}
+		}
+	}
+	ordinaryPrice := ""
+	ordinaryAvailable := 0
+	var priceOptions []QuotePriceOptionDTO
+	if ordinary != nil {
+		ordinaryPrice = formatPrice(ordinary.Price)
+		if ordinary.Stock != nil {
+			ordinaryAvailable = *ordinary.Stock
+		}
+		priceOptions = quotePriceOptions(*ordinary, ordinaryPrice, ordinaryAvailable)
+	}
+	out := make([]DurationOptionDTO, 0, len(options))
+	for _, option := range options {
+		if option.Value == "" && ordinary == nil {
+			continue
+		}
+		item := DurationOptionDTO{
+			Value: option.Value, Minutes: option.Minutes, Hours: option.Hours,
+			Price: strconv.FormatFloat(option.Price, 'f', -1, 64), Available: option.Available,
+		}
+		if option.Value == "" {
+			item.Price = ordinaryPrice
+			item.Available = ordinaryAvailable
+			item.PriceOptions = priceOptions
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		if priceErr != nil {
+			return nil, ErrProvider
+		}
+		return nil, ErrNotFound
+	}
+	return out, nil
+}
+
 func quotePriceOptions(item domain.CatalogItem, fallbackPrice string, fallbackStock int) []QuotePriceOptionDTO {
 	options := make([]QuotePriceOptionDTO, 0, len(item.PriceOptions))
 	for _, option := range item.PriceOptions {
@@ -698,8 +775,14 @@ func normalizeQualityTier(providerID, tier string) (string, error) {
 
 func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.User, ip string) (OrderDTO, error) {
 	pid := domain.NormalizeProvider(in.Provider)
+	in.CountryCode = strings.TrimSpace(in.CountryCode)
+	in.ServiceCode = strings.TrimSpace(in.ServiceCode)
+	in.Duration = strings.TrimSpace(in.Duration)
 	if pid == "" || in.CountryCode == "" || in.ServiceCode == "" {
 		return OrderDTO{}, ErrBadRequest
+	}
+	if err := validatePurchaseDuration(pid, in.Duration); err != nil {
+		return OrderDTO{}, err
 	}
 	tier, err := normalizeQualityTier(pid, in.QualityTier)
 	if err != nil {
@@ -710,12 +793,12 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if err != nil || max <= 0 || max > 1_000_000 || math.IsNaN(max) || math.IsInf(max, 0) || len(in.IdempotencyKey) < 16 || len(in.IdempotencyKey) > 128 {
 		return OrderDTO{}, ErrBadRequest
 	}
-	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, MaxPrice: max})
+	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: max})
 	if err != nil {
 		return OrderDTO{}, err
 	}
 	if !created {
-		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || math.Abs(record.MaxPrice-max) > .000001 {
+		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || record.Duration != in.Duration || math.Abs(record.MaxPrice-max) > .000001 {
 			return OrderDTO{}, purchaseError("idempotency_mismatch", nil)
 		}
 		if record.Status == "succeeded" && record.OrderID != "" {
@@ -753,7 +836,40 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		s.failPurchase(record.ID, "failed", "provider_disabled")
 		return OrderDTO{}, purchaseError("provider_disabled", nil)
 	}
-	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, MaxPrice: &max})
+	purchasePrice := max
+	if in.Duration != "" {
+		rentalClient, ok := client.(provider.RentalDurationCatalogClient)
+		if !ok {
+			s.failPurchase(record.ID, "failed", "configuration")
+			return OrderDTO{}, purchaseError("configuration", nil)
+		}
+		options, preflightErr := rentalClient.RentalDurations(ctx, key, provider.CatalogRequest{
+			Country: in.CountryCode, Service: in.ServiceCode,
+		})
+		if preflightErr != nil {
+			status, code := classifyProviderPurchaseError(preflightErr)
+			s.failPurchase(record.ID, status, code)
+			return OrderDTO{}, purchaseError(code, preflightErr)
+		}
+		var selected *provider.DurationOption
+		for index := range options {
+			if options[index].Value == in.Duration {
+				selected = &options[index]
+				break
+			}
+		}
+		if selected == nil || selected.Available <= 0 {
+			s.failPurchase(record.ID, "failed", "no_numbers")
+			return OrderDTO{}, purchaseError("no_numbers", nil)
+		}
+		if selected.Price > max+0.000001 {
+			s.failPurchase(record.ID, "failed", "price_exceeded")
+			return OrderDTO{}, purchaseError("price_exceeded", nil)
+		}
+		purchasePrice = selected.Price
+	}
+	purchaseStartedAt := s.now()
+	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: &purchasePrice})
 	s.invalidateProviderBalance(pid)
 	if err != nil {
 		status, code := classifyProviderPurchaseError(err)
@@ -765,10 +881,15 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		s.failPurchase(record.ID, status, code)
 		return OrderDTO{}, purchaseError(code, err)
 	}
-	if result.Cost > max+0.000001 {
+	if in.Duration != "" && result.Cost <= 0 {
+		// HeroSMS 兼容 getRentNumber 的成功响应不返回成本。此处使用刚由
+		// serviceCountRent 实时校验并锁定的租价，避免长租订单金额记为零。
+		result.Cost = purchasePrice
+	}
+	if result.Cost > purchasePrice+0.000001 {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if cancelErr := client.Cancel(cancelCtx, key, result.UpstreamID); cancelErr != nil {
+		if cancelErr := cancelProviderOrder(cancelCtx, client, key, result.UpstreamID, in.Duration); cancelErr != nil {
 			s.failPurchase(record.ID, "unknown", "price_cancel_unknown")
 			return OrderDTO{}, purchaseResultUnknownError("price_cancel_unknown", cancelErr)
 		}
@@ -776,14 +897,14 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		s.failPurchase(record.ID, "failed", "price_exceeded")
 		return OrderDTO{}, purchaseError("price_exceeded", nil)
 	}
-	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt}
+	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt, CreatedAt: purchaseStartedAt}
 	if o.Currency == "" {
 		o.Currency = "USD"
 	}
 	if err = s.repo.CompletePurchase(ctx, record.ID, o); err != nil {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if cancelErr := client.Cancel(cancelCtx, key, result.UpstreamID); cancelErr == nil {
+		if cancelErr := cancelProviderOrder(cancelCtx, client, key, result.UpstreamID, in.Duration); cancelErr == nil {
 			s.invalidateProviderBalance(pid)
 		}
 		s.failPurchase(record.ID, "unknown", "database_error")
@@ -794,7 +915,76 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if err != nil {
 		return OrderDTO{}, err
 	}
-	return OrderView(fresh, readSettings(p.Config).WebhookEnabled), nil
+	return s.orderView(fresh, readSettings(p.Config).WebhookEnabled), nil
+}
+
+func validatePurchaseDuration(providerID, duration string) error {
+	if duration == "" {
+		return nil
+	}
+	if providerID != domain.ProviderHeroSMS {
+		return ErrBadRequest
+	}
+	hours, err := strconv.ParseUint(duration, 10, 31)
+	if err != nil || hours == 0 || strconv.FormatUint(hours, 10) != duration {
+		return ErrBadRequest
+	}
+	return nil
+}
+
+func durationLifecycle(client provider.Client, duration string) (provider.DurationLifecycleClient, error) {
+	if strings.TrimSpace(duration) == "" {
+		return nil, nil
+	}
+	lifecycle, ok := client.(provider.DurationLifecycleClient)
+	if !ok {
+		return nil, provider.ErrInvalidRequest
+	}
+	return lifecycle, nil
+}
+
+func pollProviderOrder(ctx context.Context, client provider.Client, apiKey, upstreamID, duration string) (provider.PollResult, error) {
+	lifecycle, err := durationLifecycle(client, duration)
+	if err != nil {
+		return provider.PollResult{}, err
+	}
+	if lifecycle != nil {
+		return lifecycle.PollDuration(ctx, apiKey, upstreamID)
+	}
+	return client.Poll(ctx, apiKey, upstreamID)
+}
+
+func completeProviderOrder(ctx context.Context, client provider.Client, apiKey, upstreamID, duration string) error {
+	lifecycle, err := durationLifecycle(client, duration)
+	if err != nil {
+		return err
+	}
+	if lifecycle != nil {
+		return lifecycle.CompleteDuration(ctx, apiKey, upstreamID)
+	}
+	return client.Complete(ctx, apiKey, upstreamID)
+}
+
+func cancelProviderOrder(ctx context.Context, client provider.Client, apiKey, upstreamID, duration string) error {
+	lifecycle, err := durationLifecycle(client, duration)
+	if err != nil {
+		return err
+	}
+	if lifecycle != nil {
+		return lifecycle.CancelDuration(ctx, apiKey, upstreamID)
+	}
+	return client.Cancel(ctx, apiKey, upstreamID)
+}
+
+func requestAnotherProviderOrder(ctx context.Context, client provider.Client, apiKey, upstreamID, duration string) (provider.RequestAnotherResult, error) {
+	lifecycle, err := durationLifecycle(client, duration)
+	if err != nil {
+		return provider.RequestAnotherResult{}, err
+	}
+	if lifecycle != nil {
+		return lifecycle.RequestAnotherDuration(ctx, apiKey, upstreamID)
+	}
+	return client.RequestAnother(ctx, apiKey, upstreamID)
 }
 
 func classifyProviderPurchaseError(err error) (status, code string) {
@@ -812,7 +1002,9 @@ func classifyProviderPurchaseError(err error) (status, code string) {
 		switch providerCode {
 		case "NO_NUMBERS", "OUT_OF_STOCK":
 			return "failed", "no_numbers"
-		case "BAD_SERVICE", "BAD_COUNTRY":
+		case "BAD_DURATION":
+			return "failed", "duration_unavailable"
+		case "BAD_SERVICE", "BAD_COUNTRY", "WRONG_SERVICE", "WRONG_COUNTRY":
 			return "failed", "invalid_selection"
 		case "BAD_KEY", "BAD_ACTION", "BAD_STATUS", "NO_ACTIVATION", "EARLY_CANCEL_DENIED", "ACCOUNT_INACTIVE", "BANNED", "INVALID_BASE_URL", "INVALID_REQUEST":
 			return "failed", "configuration"
@@ -836,7 +1028,9 @@ func classifyProviderPurchaseError(err error) (status, code string) {
 		return "failed", "no_numbers"
 	case "NO_BALANCE", "INSUFFICIENT_BALANCE", "INSUFFICIENTBALANCE", "INSUFFICIENT_FUNDS", "INSUFFICIENTFUNDS", "NOT_ENOUGH_BALANCE", "NOTENOUGHBALANCE", "LOW_BALANCE", "LOWBALANCE":
 		return "failed", "insufficient_balance"
-	case "BAD_SERVICE", "BAD_COUNTRY":
+	case "BAD_DURATION":
+		return "failed", "duration_unavailable"
+	case "BAD_SERVICE", "BAD_COUNTRY", "WRONG_SERVICE", "WRONG_COUNTRY":
 		return "failed", "invalid_selection"
 	case "BAD_KEY", "BAD_ACTION", "BAD_STATUS", "NO_ACTIVATION", "EARLY_CANCEL_DENIED", "ACCOUNT_INACTIVE", "BANNED", "INVALID_BASE_URL", "INVALID_REQUEST":
 		return "failed", "configuration"
@@ -873,6 +1067,7 @@ func (s *Service) PurchaseAttempts(ctx context.Context, user domain.User) ([]Pur
 			ServiceCode: record.ServiceCode,
 			ServiceName: record.ServiceName,
 			QualityTier: record.QualityTier,
+			Duration:    record.Duration,
 			MaxPrice:    strconv.FormatFloat(record.MaxPrice, 'f', -1, 64),
 			Status:      record.Status,
 			ErrorCode:   purchaseAttemptErrorCode(record.Status, record.ErrorCode),
@@ -925,7 +1120,7 @@ func (s *Service) Orders(ctx context.Context, q OrderQuery, user domain.User) (P
 	out := make([]OrderDTO, 0, len(orders))
 	for _, o := range orders {
 		p, _ := s.repo.GetProvider(ctx, o.ProviderID)
-		out = append(out, OrderView(o, readSettings(p.Config).WebhookEnabled))
+		out = append(out, s.orderView(o, readSettings(p.Config).WebhookEnabled))
 	}
 	return Page[OrderDTO]{Items: out, Total: total, Page: q.Page, PageSize: q.PageSize}, nil
 }
@@ -939,9 +1134,373 @@ func (s *Service) Order(ctx context.Context, id string, user domain.User) (Order
 		return OrderDTO{}, mapStore(err)
 	}
 	p, _ := s.repo.GetProvider(ctx, o.ProviderID)
-	return OrderView(o, readSettings(p.Config).WebhookEnabled), nil
+	return s.orderView(o, readSettings(p.Config).WebhookEnabled), nil
+}
+func (s *Service) RenewalOptions(ctx context.Context, id string, user domain.User) (RenewalOptionsDTO, error) {
+	scope := ""
+	if user.Role != "admin" {
+		scope = user.ID
+	}
+	o, err := s.repo.GetOrder(ctx, id, scope)
+	if err != nil {
+		return RenewalOptionsDTO{}, mapStore(err)
+	}
+	if abandonedRenewalClaim(o, s.now()) && o.RenewalRequestID != "" {
+		err = s.repo.WithOrderLock(ctx, o.ID, func(lockCtx context.Context) error {
+			fresh, getErr := s.repo.GetOrder(lockCtx, o.ID, scope)
+			if getErr != nil {
+				return getErr
+			}
+			if abandonedRenewalClaim(fresh, s.now()) && fresh.RenewalRequestID != "" {
+				return s.repo.ReleaseOrderRenewal(lockCtx, fresh.RenewalRequestID, fresh.ID, "abandoned_before_submit")
+			}
+			return nil
+		})
+		if err != nil {
+			return RenewalOptionsDTO{}, mapStore(err)
+		}
+		o, err = s.repo.GetOrder(ctx, id, scope)
+		if err != nil {
+			return RenewalOptionsDTO{}, mapStore(err)
+		}
+	}
+	mode, eligible := renewalModeForOrder(o)
+	if !eligible {
+		return RenewalOptionsDTO{Options: []RenewalOptionDTO{}}, nil
+	}
+	p, key, client, err := s.providerClient(ctx, o.ProviderID)
+	if err != nil {
+		return RenewalOptionsDTO{}, err
+	}
+	if !p.Enabled {
+		return RenewalOptionsDTO{Mode: mode, Options: []RenewalOptionDTO{}}, nil
+	}
+	renewalClient, ok := client.(provider.RenewalClient)
+	if !ok {
+		return RenewalOptionsDTO{Mode: mode, Options: []RenewalOptionDTO{}}, nil
+	}
+	options, err := renewalClient.RenewalOptions(ctx, key, o.UpstreamID, mode)
+	if err != nil {
+		if providerRenewalUnavailable(err) {
+			return RenewalOptionsDTO{Mode: mode, Options: []RenewalOptionDTO{}}, nil
+		}
+		return RenewalOptionsDTO{}, renewalProviderError(err, false)
+	}
+	return renewalOptionsView(mode, options, o.Currency), nil
+}
+
+func (s *Service) RenewOrder(ctx context.Context, id string, in RenewalInput, user domain.User, ip string) (OrderDTO, error) {
+	in.Unit = strings.ToLower(strings.TrimSpace(in.Unit))
+	in.IdempotencyKey = strings.TrimSpace(in.IdempotencyKey)
+	quotedPrice, err := strconv.ParseFloat(strings.TrimSpace(in.QuotedPrice), 64)
+	if in.Value <= 0 || in.Unit == "" || err != nil || quotedPrice < 0 || math.IsNaN(quotedPrice) || math.IsInf(quotedPrice, 0) ||
+		len(in.IdempotencyKey) < 16 || len(in.IdempotencyKey) > 128 {
+		return OrderDTO{}, ErrBadRequest
+	}
+	if record, getErr := s.repo.GetRenewalRequest(ctx, user.ID, in.IdempotencyKey); getErr == nil {
+		return s.renewalRequestResult(ctx, record, id, in, user)
+	} else if !errors.Is(getErr, store.ErrNotFound) {
+		return OrderDTO{}, mapStore(getErr)
+	}
+
+	scope := ""
+	if user.Role != "admin" {
+		scope = user.ID
+	}
+	var view OrderDTO
+	var replay *store.RenewalRecord
+	err = s.repo.WithOrderLock(ctx, id, func(lockCtx context.Context) error {
+		if record, getErr := s.repo.GetRenewalRequest(lockCtx, user.ID, in.IdempotencyKey); getErr == nil {
+			replay = &record
+			return nil
+		} else if !errors.Is(getErr, store.ErrNotFound) {
+			return getErr
+		}
+
+		o, getErr := s.repo.GetOrder(lockCtx, id, scope)
+		if getErr != nil {
+			return mapStore(getErr)
+		}
+		if o.RenewalInflight {
+			if !abandonedRenewalClaim(o, s.now()) || o.RenewalRequestID == "" {
+				return renewalInProgressError()
+			}
+			if releaseErr := s.repo.ReleaseOrderRenewal(lockCtx, o.RenewalRequestID, o.ID, "abandoned_before_submit"); releaseErr != nil {
+				return mapStore(releaseErr)
+			}
+			o.RenewalRequestID = ""
+			o.RenewalInflight = false
+			o.RenewalInflightAt = nil
+		}
+		mode, eligible := renewalModeForOrder(o)
+		if !eligible {
+			return renewalNotAvailableError()
+		}
+		p, key, client, clientErr := s.providerClient(lockCtx, o.ProviderID)
+		if clientErr != nil {
+			return clientErr
+		}
+		if !p.Enabled {
+			return renewalNotAvailableError()
+		}
+		renewalClient, ok := client.(provider.RenewalClient)
+		if !ok {
+			return renewalNotAvailableError()
+		}
+		options, optionErr := renewalClient.RenewalOptions(lockCtx, key, o.UpstreamID, mode)
+		if optionErr != nil {
+			return renewalProviderError(optionErr, false)
+		}
+		selected, found := findRenewalOption(options, in.Value, in.Unit)
+		if !found {
+			return renewalNotAvailableError()
+		}
+		if math.Abs(selected.Price-quotedPrice) > 0.000001 {
+			return renewalPriceChangedError()
+		}
+
+		record := store.RenewalRecord{
+			ID: identity.UUID(), UserID: user.ID, OrderID: o.ID,
+			IdempotencyKey: in.IdempotencyKey, ProviderID: o.ProviderID, UpstreamID: o.UpstreamID,
+			Mode: mode, Value: selected.Value, Unit: selected.Unit, QuotedPrice: selected.Price, Baseline: selected.Baseline,
+		}
+		reserved, created, reserveErr := s.repo.StartOrderRenewal(lockCtx, record)
+		if reserveErr != nil {
+			if errors.Is(reserveErr, store.ErrConflict) {
+				return renewalInProgressError()
+			}
+			return mapStore(reserveErr)
+		}
+		if !created {
+			replay = &reserved
+			return nil
+		}
+		record = reserved
+		releaseClaim := true
+		defer func() {
+			if releaseClaim {
+				s.releaseOrderRenewal(record.ID, o.ID, "not_submitted")
+			}
+		}()
+		renewalSubmittedAt := s.now().UTC()
+		submitted, submitErr := s.repo.MarkOrderRenewalSubmitted(lockCtx, record.ID, o.ID)
+		if submitErr != nil {
+			return mapStore(submitErr)
+		}
+		if !submitted {
+			return renewalInProgressError()
+		}
+
+		result, renewErr := renewalClient.Renew(lockCtx, key, o.UpstreamID, provider.RenewalRequest{
+			Mode: mode, Value: selected.Value, Unit: selected.Unit, SubmittedAt: renewalSubmittedAt, Baseline: selected.Baseline,
+			PhoneNumber: o.PhoneNumber, Country: o.CountryCode, Service: o.ServiceCode,
+		})
+		s.invalidateProviderBalance(o.ProviderID)
+		if renewErr != nil {
+			if providerRenewalOutcomeUnknown(renewErr) {
+				releaseClaim = false
+				return renewalProviderError(renewErr, true)
+			}
+			code := strings.ToLower(providerRenewalCode(renewErr))
+			if code == "" {
+				code = "provider_rejected"
+			}
+			if releaseErr := s.repo.ReleaseOrderRenewal(lockCtx, record.ID, o.ID, code); releaseErr != nil {
+				releaseClaim = false
+				return renewalResultUnknownError(releaseErr)
+			}
+			releaseClaim = false
+			return renewalProviderError(renewErr, true)
+		}
+		if result.ExpiresAt == nil || result.Cost < 0 || math.IsNaN(result.Cost) || math.IsInf(result.Cost, 0) ||
+			(result.PhoneNumber != "" && !samePhoneNumber(o.PhoneNumber, result.PhoneNumber)) {
+			releaseClaim = false
+			return renewalResultUnknownError(nil)
+		}
+		upstreamID := strings.TrimSpace(result.UpstreamID)
+		if upstreamID == "" {
+			upstreamID = o.UpstreamID
+		}
+		duration := renewalDuration(o, mode, selected)
+		activationStartedAt := o.ActivationStartedAt
+		if activationStartedAt.IsZero() {
+			activationStartedAt = o.CreatedAt
+		}
+		nonRefundable := o.NonRefundable
+		if mode == provider.RenewalReactivate {
+			activationStartedAt = renewalSubmittedAt
+			nonRefundable = o.ProviderID == domain.ProviderSMSPool
+		}
+		totalCost := o.Cost + result.Cost
+		if o.ProviderID == domain.ProviderSMSPool {
+			totalCost = result.Cost
+		}
+		expiresAt := result.ExpiresAt.UTC()
+		if persistErr := s.repo.CompleteOrderRenewal(lockCtx, record.ID, o.ID, upstreamID, result.PhoneNumber, duration, expiresAt, totalCost, result.Cost, activationStartedAt, nonRefundable); persistErr != nil {
+			releaseClaim = false
+			return renewalResultUnknownError(persistErr)
+		}
+		releaseClaim = false
+		auditPayload, _ := json.Marshal(map[string]any{
+			"requestId": record.ID, "mode": mode, "value": selected.Value, "unit": selected.Unit,
+			"quotedPrice": selected.Price, "chargedPrice": result.Cost,
+		})
+		_ = s.repo.Audit(lockCtx, &user.ID, "order.renew", "order", o.ID, ip, auditPayload)
+
+		o.UpstreamID = upstreamID
+		if result.PhoneNumber != "" {
+			o.PhoneNumber = result.PhoneNumber
+		}
+		o.Duration = duration
+		o.Status = domain.OrderActive
+		o.Cost = totalCost
+		o.CanGetAnotherSMS = true
+		o.ExpiresAt = &expiresAt
+		o.ActivationStartedAt = activationStartedAt
+		o.NonRefundable = nonRefundable
+		o.RenewalRequestID = ""
+		o.RenewalInflight = false
+		o.UpdatedAt = s.now().UTC()
+		view = s.orderView(o, readSettings(p.Config).WebhookEnabled)
+		if fresh, freshErr := s.repo.GetOrder(lockCtx, o.ID, scope); freshErr == nil {
+			view = s.orderView(fresh, readSettings(p.Config).WebhookEnabled)
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return OrderDTO{}, renewalInProgressError()
+		}
+		return OrderDTO{}, mapStore(err)
+	}
+	if replay != nil {
+		return s.renewalRequestResult(ctx, *replay, id, in, user)
+	}
+	return view, nil
+}
+
+func (s *Service) renewalRequestResult(ctx context.Context, record store.RenewalRecord, orderID string, in RenewalInput, user domain.User) (OrderDTO, error) {
+	quotedPrice, _ := strconv.ParseFloat(strings.TrimSpace(in.QuotedPrice), 64)
+	if record.OrderID != orderID || record.Value != in.Value || record.Unit != in.Unit ||
+		math.Abs(record.QuotedPrice-quotedPrice) > 0.000001 {
+		return OrderDTO{}, renewalIdempotencyMismatchError()
+	}
+	switch record.Status {
+	case "succeeded":
+		return s.Order(ctx, orderID, user)
+	case "provisioning":
+		return OrderDTO{}, renewalInProgressError()
+	case "unknown":
+		return OrderDTO{}, renewalResultUnknownError(nil)
+	case "failed":
+		return OrderDTO{}, renewalNotAvailableError()
+	default:
+		return OrderDTO{}, renewalResultUnknownError(nil)
+	}
+}
+
+const unsubmittedRenewalClaimTTL = 2 * time.Minute
+
+func abandonedRenewalClaim(order domain.Order, now time.Time) bool {
+	return order.RenewalInflight && order.RenewalSubmittedAt == nil && order.RenewalInflightAt != nil &&
+		!order.RenewalInflightAt.After(now.Add(-unsubmittedRenewalClaimTTL))
+}
+func renewalModeForOrder(order domain.Order) (string, bool) {
+	if order.RenewalInflight {
+		return "", false
+	}
+	switch order.ProviderID {
+	case domain.ProviderHeroSMS:
+		if order.Status == domain.OrderCompleted {
+			return provider.RenewalReactivate, true
+		}
+		if order.Duration != "" && (order.Status == domain.OrderActive || order.Status == domain.OrderExpired) {
+			return provider.RenewalProlong, true
+		}
+	case domain.ProviderSMSPool:
+		if len(order.Messages) == 0 && (order.Status == domain.OrderCanceled || order.Status == domain.OrderExpired) {
+			return provider.RenewalReactivate, true
+		}
+	}
+	return "", false
+}
+
+func renewalOptionsView(mode string, options []provider.RenewalOption, currency string) RenewalOptionsDTO {
+	if currency == "" {
+		currency = "USD"
+	}
+	view := RenewalOptionsDTO{Mode: mode, Options: make([]RenewalOptionDTO, 0, len(options))}
+	for _, option := range options {
+		minutes := 0
+		switch option.Unit {
+		case "minute":
+			minutes = option.Value
+		case "hour":
+			if option.Value > int(^uint(0)>>1)/60 {
+				continue
+			}
+			minutes = option.Value * 60
+		case "activation":
+		default:
+			continue
+		}
+		if option.Value <= 0 || option.Price < 0 || math.IsNaN(option.Price) || math.IsInf(option.Price, 0) {
+			continue
+		}
+		view.Options = append(view.Options, RenewalOptionDTO{
+			Value: option.Value, Unit: option.Unit, Minutes: minutes,
+			Price: strconv.FormatFloat(option.Price, 'f', -1, 64), Currency: currency,
+		})
+	}
+	return view
+}
+
+func findRenewalOption(options []provider.RenewalOption, value int, unit string) (provider.RenewalOption, bool) {
+	for _, option := range options {
+		if option.Value == value && option.Unit == unit {
+			return option, true
+		}
+	}
+	return provider.RenewalOption{}, false
+}
+
+func renewalDuration(order domain.Order, mode string, option provider.RenewalOption) string {
+	if order.ProviderID != domain.ProviderHeroSMS {
+		return order.Duration
+	}
+	if mode == provider.RenewalProlong {
+		// prolong 的 duration 是本次增量，不是号码的原始租赁类型/总租期。
+		return order.Duration
+	}
+	if option.Unit == "hour" {
+		return strconv.Itoa(option.Value)
+	}
+	return ""
+}
+func samePhoneNumber(left, right string) bool {
+	digits := func(value string) string {
+		var builder strings.Builder
+		for _, char := range value {
+			if char >= '0' && char <= '9' {
+				builder.WriteRune(char)
+			}
+		}
+		return strings.TrimLeft(builder.String(), "0")
+	}
+	return digits(left) != "" && digits(left) == digits(right)
+}
+
+func (s *Service) releaseOrderRenewal(requestID, orderID, errorCode string) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.repo.ReleaseOrderRenewal(cleanupCtx, requestID, orderID, errorCode); err != nil {
+		slog.Error("释放续期操作认领失败", "request_id", requestID, "order_id", orderID, "error", err)
+	}
 }
 func (s *Service) FinishOrder(ctx context.Context, id, action string, user domain.User, ip string) (OrderDTO, error) {
+	if action != "cancel" && action != "complete" {
+		return OrderDTO{}, ErrBadRequest
+	}
 	scope := ""
 	if user.Role != "admin" {
 		scope = user.ID
@@ -952,10 +1511,15 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 		if err != nil {
 			return mapStore(err)
 		}
-		if o.Terminal() {
-			return ErrConflict
+		if o.RenewalInflight {
+			return renewalInProgressError()
 		}
-		if action == "cancel" && len(o.Messages) > 0 {
+		if action == "cancel" {
+			decision := EvaluateCancelPolicy(o, s.now())
+			if !decision.Allowed {
+				return cancelPolicyError(decision)
+			}
+		} else if o.Terminal() {
 			return ErrConflict
 		}
 		p, key, client, err := s.providerClient(lockCtx, o.ProviderID)
@@ -964,17 +1528,17 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 		}
 		status := domain.OrderCompleted
 		if action == "cancel" {
-			err = client.Cancel(lockCtx, key, o.UpstreamID)
+			err = cancelProviderOrder(lockCtx, client, key, o.UpstreamID, o.Duration)
 			s.invalidateProviderBalance(o.ProviderID)
 			if err != nil {
-				return ErrProvider
+				return orderActionProviderError(action, err)
 			}
 			status = domain.OrderCanceled
 		} else {
-			err = client.Complete(lockCtx, key, o.UpstreamID)
+			err = completeProviderOrder(lockCtx, client, key, o.UpstreamID, o.Duration)
 			s.invalidateProviderBalance(o.ProviderID)
 			if err != nil {
-				return ErrProvider
+				return orderActionProviderError(action, err)
 			}
 		}
 		if err = s.repo.SetOrderStatus(lockCtx, o.ID, status, "user_"+action); err != nil {
@@ -985,7 +1549,7 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 		if err != nil {
 			return err
 		}
-		view = OrderView(o, readSettings(p.Config).WebhookEnabled)
+		view = s.orderView(o, readSettings(p.Config).WebhookEnabled)
 		return nil
 	})
 	if err != nil {
@@ -1025,7 +1589,7 @@ func (s *Service) Dashboard(ctx context.Context, user domain.User) (DashboardDTO
 	}
 	for _, o := range orders {
 		p, _ := s.repo.GetProvider(ctx, o.ProviderID)
-		out.RecentOrders = append(out.RecentOrders, OrderView(o, readSettings(p.Config).WebhookEnabled))
+		out.RecentOrders = append(out.RecentOrders, s.orderView(o, readSettings(p.Config).WebhookEnabled))
 	}
 	return out, nil
 }
@@ -1316,6 +1880,8 @@ func (s *Service) Webhook(ctx context.Context, pid, token string, payload, heade
 func (s *Service) Run(ctx context.Context) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	renewalTicker := time.NewTicker(10 * time.Second)
+	defer renewalTicker.Stop()
 	maintenanceTicker := time.NewTicker(time.Hour)
 	defer maintenanceTicker.Stop()
 	jobs := make(chan func(), 128)
@@ -1357,6 +1923,7 @@ func (s *Service) Run(ctx context.Context) {
 		}
 	}
 	s.pollBatch(ctx, submit)
+	s.reconcileRenewalBatch(ctx, submit)
 	for {
 		select {
 		case <-ctx.Done():
@@ -1376,7 +1943,8 @@ func (s *Service) Run(ctx context.Context) {
 			submit(func() { s.requestAnother(ctx, order) })
 		case <-ticker.C:
 			s.pollBatch(ctx, submit)
-		case <-maintenanceTicker.C:
+		case <-renewalTicker.C:
+			s.reconcileRenewalBatch(ctx, submit)
 			submit(func() {
 				maintenanceCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
@@ -1385,6 +1953,102 @@ func (s *Service) Run(ctx context.Context) {
 				}
 			})
 		}
+	}
+}
+
+const (
+	renewalReconcileDelay = 30 * time.Second
+	renewalReconcileLease = 30 * time.Second
+)
+
+func (s *Service) reconcileRenewalBatch(ctx context.Context, submit func(func())) {
+	orders, err := s.repo.ClaimDueRenewals(ctx, 10, s.now().Add(-renewalReconcileDelay), renewalReconcileLease)
+	if err != nil {
+		slog.Error("领取续期对账任务失败", "error", err)
+		return
+	}
+	for _, order := range orders {
+		if ctx.Err() != nil {
+			return
+		}
+		candidate := order
+		submit(func() { s.reconcileRenewal(ctx, candidate) })
+	}
+}
+
+func (s *Service) reconcileRenewal(ctx context.Context, snapshot domain.Order) {
+	if !snapshot.RenewalInflight || snapshot.RenewalSubmittedAt == nil || snapshot.RenewalRequestID == "" {
+		return
+	}
+	_, key, client, err := s.providerClient(ctx, snapshot.ProviderID)
+	if err != nil {
+		slog.Warn("续期对账读取供应商失败", "request_id", snapshot.RenewalRequestID, "order_id", snapshot.ID)
+		return
+	}
+	reconciler, ok := client.(provider.RenewalReconcileClient)
+	if !ok {
+		slog.Warn("供应商未实现续期对账", "provider", snapshot.ProviderID, "order_id", snapshot.ID)
+		return
+	}
+	result, found, err := reconciler.ReconcileRenewal(ctx, key, snapshot.UpstreamID, provider.RenewalRequest{
+		Mode: snapshot.RenewalMode, Value: snapshot.RenewalValue, Unit: snapshot.RenewalUnit,
+		Baseline: snapshot.RenewalBaseline, SubmittedAt: *snapshot.RenewalSubmittedAt, PhoneNumber: snapshot.PhoneNumber,
+		Country: snapshot.CountryCode, Service: snapshot.ServiceCode,
+	})
+	if err != nil || !found {
+		if err != nil {
+			slog.Warn("续期结果对账暂未确认", "provider", snapshot.ProviderID, "request_id", snapshot.RenewalRequestID, "order_id", snapshot.ID)
+		}
+		return
+	}
+	if result.ExpiresAt == nil || result.Cost < 0 || math.IsNaN(result.Cost) || math.IsInf(result.Cost, 0) ||
+		(result.PhoneNumber != "" && !samePhoneNumber(snapshot.PhoneNumber, result.PhoneNumber)) {
+		slog.Warn("续期结果对账返回无效", "provider", snapshot.ProviderID, "request_id", snapshot.RenewalRequestID, "order_id", snapshot.ID)
+		return
+	}
+
+	err = s.repo.WithOrderLock(ctx, snapshot.ID, func(lockCtx context.Context) error {
+		fresh, getErr := s.repo.GetOrder(lockCtx, snapshot.ID, "")
+		if getErr != nil {
+			return getErr
+		}
+		if !fresh.RenewalInflight || fresh.RenewalRequestID != snapshot.RenewalRequestID || fresh.RenewalSubmittedAt == nil || fresh.Status != snapshot.Status {
+			return nil
+		}
+		upstreamID := strings.TrimSpace(result.UpstreamID)
+		if upstreamID == "" {
+			upstreamID = fresh.UpstreamID
+		}
+		selected := provider.RenewalOption{Value: fresh.RenewalValue, Unit: fresh.RenewalUnit, Price: fresh.RenewalQuotedPrice}
+		duration := renewalDuration(fresh, fresh.RenewalMode, selected)
+		activationStartedAt := fresh.ActivationStartedAt
+		if activationStartedAt.IsZero() {
+			activationStartedAt = fresh.CreatedAt
+		}
+		nonRefundable := fresh.NonRefundable
+		if fresh.RenewalMode == provider.RenewalReactivate {
+			activationStartedAt = fresh.RenewalSubmittedAt.UTC()
+			nonRefundable = fresh.ProviderID == domain.ProviderSMSPool
+		}
+		totalCost := fresh.Cost + result.Cost
+		if fresh.ProviderID == domain.ProviderSMSPool {
+			totalCost = result.Cost
+		}
+		expiresAt := result.ExpiresAt.UTC()
+		if completeErr := s.repo.CompleteOrderRenewal(lockCtx, fresh.RenewalRequestID, fresh.ID, upstreamID,
+			result.PhoneNumber, duration, expiresAt, totalCost, result.Cost, activationStartedAt, nonRefundable); completeErr != nil {
+			return completeErr
+		}
+		s.invalidateProviderBalance(fresh.ProviderID)
+		meta, _ := json.Marshal(map[string]any{
+			"requestId": snapshot.RenewalRequestID, "mode": fresh.RenewalMode,
+			"chargedPrice": result.Cost, "source": "reconcile",
+		})
+		_ = s.repo.Audit(lockCtx, nil, "order.renew.reconcile", "order", fresh.ID, "", meta)
+		return nil
+	})
+	if err != nil && !errors.Is(err, store.ErrConflict) {
+		slog.Error("续期结果对账落库失败", "request_id", snapshot.RenewalRequestID, "order_id", snapshot.ID, "error", err)
 	}
 }
 func (s *Service) pollBatch(ctx context.Context, submit func(func())) {
@@ -1401,20 +2065,81 @@ func (s *Service) pollBatch(ctx context.Context, submit func(func())) {
 		submit(func() { s.pollOne(ctx, order) })
 	}
 }
-func (s *Service) pollOne(ctx context.Context, o domain.Order) {
-	if o.ExpiresAt != nil && !o.ExpiresAt.After(s.now()) {
-		s.transitionPolledOrder(ctx, o.ID, domain.OrderExpired, "local_expired")
+func (s *Service) pollOne(ctx context.Context, snapshot domain.Order) {
+	locallyExpired := snapshot.ExpiresAt != nil && !snapshot.ExpiresAt.After(s.now())
+	p, key, client, err := s.providerClient(ctx, snapshot.ProviderID)
+	if err != nil {
+		s.applyPollFailure(ctx, snapshot, "configuration", locallyExpired)
 		return
 	}
-	p, key, client, err := s.providerClient(ctx, o.ProviderID)
+	result, err := pollProviderOrder(ctx, client, key, snapshot.UpstreamID, snapshot.Duration)
 	if err != nil {
-		s.pollFailure(ctx, o, "configuration")
+		s.applyPollFailure(ctx, snapshot, "provider_error", locallyExpired)
 		return
 	}
-	result, err := client.Poll(ctx, key, o.UpstreamID)
-	if err != nil {
-		s.pollFailure(ctx, o, "provider_error")
-		return
+
+	var requestOrder *domain.Order
+	lockErr := s.repo.WithOrderLock(ctx, snapshot.ID, func(lockCtx context.Context) error {
+		fresh, getErr := s.repo.GetOrder(lockCtx, snapshot.ID, "")
+		if errors.Is(getErr, store.ErrNotFound) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if !pollSnapshotCurrent(snapshot, fresh) {
+			return nil
+		}
+		requestOrder, getErr = s.applyPollResultLocked(lockCtx, fresh, p, result)
+		return getErr
+	})
+	if lockErr != nil && !errors.Is(lockErr, store.ErrConflict) {
+		slog.Warn("应用轮询结果失败", "order_id", snapshot.ID, "error", lockErr)
+	}
+	if requestOrder != nil {
+		s.requestAnother(ctx, *requestOrder)
+	}
+}
+
+func (s *Service) applyPollFailure(ctx context.Context, snapshot domain.Order, state string, locallyExpired bool) {
+	err := s.repo.WithOrderLock(ctx, snapshot.ID, func(lockCtx context.Context) error {
+		fresh, getErr := s.repo.GetOrder(lockCtx, snapshot.ID, "")
+		if errors.Is(getErr, store.ErrNotFound) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if !pollSnapshotCurrent(snapshot, fresh) {
+			return nil
+		}
+		if locallyExpired {
+			return s.repo.SetOrderStatus(lockCtx, fresh.ID, domain.OrderExpired, "local_expired")
+		}
+		s.pollFailure(lockCtx, fresh, state)
+		return nil
+	})
+	if err != nil && !errors.Is(err, store.ErrConflict) {
+		slog.Warn("应用轮询失败状态失败", "order_id", snapshot.ID, "error", err)
+	}
+}
+
+func pollSnapshotCurrent(snapshot, fresh domain.Order) bool {
+	if fresh.Status != domain.OrderActive || fresh.RenewalInflight || fresh.UpstreamID != snapshot.UpstreamID {
+		return false
+	}
+	return snapshot.UpdatedAt.IsZero() || !fresh.UpdatedAt.After(snapshot.UpdatedAt)
+}
+func (s *Service) applyPollResultLocked(ctx context.Context, o domain.Order, p domain.Provider, result provider.PollResult) (*domain.Order, error) {
+	locallyExpired := o.ExpiresAt != nil && !o.ExpiresAt.After(s.now())
+	var expiryUpdateErr error
+	if result.ExpiresAt != nil {
+		expiresAt := result.ExpiresAt.UTC()
+		if expiryUpdateErr = s.repo.UpdateOrderExpiresAt(ctx, o.ID, expiresAt); expiryUpdateErr != nil {
+			slog.Warn("供应商期限写入失败，继续处理本次轮询消息和终态", "order_id", o.ID, "error", expiryUpdateErr)
+		}
+		o.ExpiresAt = &expiresAt
+		locallyExpired = !expiresAt.After(s.now())
 	}
 	terminalStatus := ""
 	switch result.State {
@@ -1459,10 +2184,10 @@ func (s *Service) pollOne(ctx context.Context, o domain.Order) {
 			fp = messageFingerprintWithSequence(o, received, hasTime, up.Code, up.Text, sequence)
 		}
 		m := domain.SMSMessage{ID: identity.UUID(), OrderID: o.ID, ProviderID: o.ProviderID, Code: up.Code, Text: up.Text, Source: "poll", UpstreamFingerprint: fp, ReceivedAt: received}
-		inserted, e := s.repo.SaveMessage(ctx, m, true)
-		if e != nil {
+		inserted, saveErr := s.repo.SaveMessage(ctx, m, true)
+		if saveErr != nil {
 			s.pollFailure(ctx, o, "database_error")
-			return
+			return nil, nil
 		}
 		if inserted {
 			insertedAny = true
@@ -1471,24 +2196,30 @@ func (s *Service) pollOne(ctx context.Context, o domain.Order) {
 		}
 	}
 	if terminalStatus != "" {
-		s.transitionPolledOrder(ctx, o.ID, terminalStatus, result.State)
-		return
+		return nil, s.repo.SetOrderStatus(ctx, o.ID, terminalStatus, result.State)
+	}
+	if locallyExpired {
+		return nil, s.repo.SetOrderStatus(ctx, o.ID, domain.OrderExpired, "local_expired")
+	}
+	if expiryUpdateErr != nil {
+		s.pollFailure(ctx, o, "database_error")
+		return nil, nil
 	}
 	interval := time.Duration(readSettings(p.Config).PollingIntervalSeconds) * time.Second
 	if o.ProviderID != domain.ProviderSMSPool && interval < 30*time.Second {
 		interval = 30 * time.Second
 	}
-	_ = s.repo.UpdatePoll(ctx, o.ID, state, s.now().Add(interval), 0)
+	_ = s.repo.UpdatePoll(ctx, o.ID, state, nextPollAt(s.now().Add(interval), o.ExpiresAt), 0)
 	if insertedAny && result.CanRequestAnother {
 		o.PollSequence = sequence
 		o.RequestNextPending = true
 		o.RequestNextFailures = 0
 	}
 	if o.RequestNextPending || insertedAny && result.CanRequestAnother {
-		s.requestAnother(ctx, o)
+		return &o, nil
 	}
+	return nil, nil
 }
-
 func (s *Service) transitionPolledOrder(ctx context.Context, id, status, state string) {
 	err := s.repo.WithOrderLock(ctx, id, func(lockCtx context.Context) error {
 		fresh, err := s.repo.GetOrder(lockCtx, id, "")
@@ -1538,7 +2269,7 @@ func (s *Service) requestAnother(parent context.Context, o domain.Order) {
 			s.restoreRequestNext(fresh)
 			return nil
 		}
-		result, err := client.RequestAnother(lockCtx, key, fresh.UpstreamID)
+		result, err := requestAnotherProviderOrder(lockCtx, client, key, fresh.UpstreamID, fresh.Duration)
 		s.invalidateProviderBalance(fresh.ProviderID)
 		if err != nil {
 			slog.Warn("请求继续接收短信失败", "provider", fresh.ProviderID, "order_id", fresh.ID)
@@ -1666,7 +2397,14 @@ func (s *Service) pollFailure(ctx context.Context, o domain.Order, state string)
 	if delay > 2*time.Minute {
 		delay = 2 * time.Minute
 	}
-	_ = s.repo.UpdatePoll(ctx, o.ID, state, s.now().Add(delay), fail)
+	_ = s.repo.UpdatePoll(ctx, o.ID, state, nextPollAt(s.now().Add(delay), o.ExpiresAt), fail)
+}
+
+func nextPollAt(candidate time.Time, expiresAt *time.Time) time.Time {
+	if expiresAt != nil && expiresAt.Before(candidate) {
+		return *expiresAt
+	}
+	return candidate
 }
 
 func scalar(m map[string]any, keys ...string) string {
