@@ -13,6 +13,8 @@
 
 ## 平台接收策略
 
+Webhook 的部署前提、供应商配置、请求格式、验证方法与常见问题，请参阅 [Webhook 使用说明](docs/webhook.md)。
+
 - HeroSMS 使用原生 REST API，Webhook 为主，并通过完整 OTP 列表进行低频补偿对账。
 - SMSBower 使用账户中配置的 Webhook，兼容接口轮询兜底；收到验证码后自动请求继续接收下一条。
 - SMSPool 支持 Custom Webhook，同时保留轮询对账；需要下一条短信时先检查 resend 能力再请求 resend，供应商返回的追加费用会计入订单金额。
