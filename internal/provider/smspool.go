@@ -108,6 +108,9 @@ func (c *SMSPool) Catalog(ctx context.Context, apiKey string, request CatalogReq
 		return nil, businessErr
 	}
 	if kind == CatalogPrice {
+		if strings.TrimSpace(request.Country) != "" && strings.TrimSpace(request.Service) != "" {
+			return c.directedPriceCatalog(ctx, apiKey, payload, request)
+		}
 		items, parseErr := parsePriceCatalog(payload, domain.ProviderSMSPool, request.Country, request.Service)
 		if parseErr != nil {
 			return nil, c.http.failure("catalog.price", "INVALID_RESPONSE", 0, false, nil)

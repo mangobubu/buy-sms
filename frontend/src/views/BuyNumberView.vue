@@ -42,6 +42,7 @@ const loadingCountries = ref(false)
 const loadingServices = ref(false)
 const loadingDurations = ref(false)
 const loadingQuote = ref(false)
+const priceLoadFailed = ref(false)
 const purchasing = ref(false)
 const PURCHASE_INTENT_KEY = 'buy_sms_purchase_intent'
 const FORM_SELECTION_KEY = 'buy_sms_form_selection'
@@ -235,6 +236,13 @@ const priceOptions = computed<DisplayPriceOption[]>(() => {
 const selectedPriceOption = computed(() =>
   priceOptions.value.find((option) => option.key === form.priceSelection),
 )
+const priceSelectionPlaceholder = computed(() => {
+  if (loadingQuote.value || loadingDurations.value) return '正在刷新价格'
+  if (!form.countryCode) return '选择国家后加载价格'
+  if (priceLoadFailed.value) return '价格加载失败，请点击刷新平台重试'
+  if (priceOptions.value.length) return '请选择最新价格'
+  return '当前服务与国家暂无可用报价或库存'
+})
 
 function smsBowerTierLabel(tier?: SmsBowerTier): string {
   return smsBowerTiers.find((option) => option.value === tier)?.label || ''
@@ -343,6 +351,7 @@ function saveCurrentSelection(provider = form.provider): void {
 }
 
 function clearPriceSelection(): void {
+  priceLoadFailed.value = false
   form.tier = ''
   form.priceSelection = ''
   form.maxPrice = ''
@@ -580,6 +589,7 @@ async function loadDurations(): Promise<DurationOption[] | null> {
   const country = form.countryCode
   const service = form.serviceCode
   const generation = ++durationGeneration
+  priceLoadFailed.value = false
   loadingDurations.value = true
   try {
     const result = normalizeDurationOptions(await catalogApi.durations(provider, country, service))
@@ -592,7 +602,12 @@ async function loadDurations(): Promise<DurationOption[] | null> {
     durationOptions.value = result
     return result
   } catch (reason) {
-    if (generation === durationGeneration) ElMessage.error(errorMessage(reason, '购买时长加载失败'))
+    if (generation === durationGeneration) {
+      priceLoadFailed.value = true
+      durationOptions.value = []
+      resetSelectedPrice()
+      ElMessage.error(errorMessage(reason, '购买时长加载失败'))
+    }
     return null
   } finally {
     if (generation === durationGeneration) loadingDurations.value = false
@@ -607,6 +622,7 @@ async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<
   const duration = form.duration
   const savedSelection = form.priceSelection
   const generation = ++quoteGeneration
+  priceLoadFailed.value = false
   loadingQuote.value = true
   try {
     let result: Quote[]
@@ -638,7 +654,12 @@ async function loadQuote(options: { requireSelection?: boolean } = {}): Promise<
     selectPrice(nextSelection)
     return result
   } catch (reason) {
-    if (generation === quoteGeneration) ElMessage.error(errorMessage(reason, '报价加载失败'))
+    if (generation === quoteGeneration) {
+      priceLoadFailed.value = true
+      quotes.value = []
+      resetSelectedPrice()
+      ElMessage.error(errorMessage(reason, '报价加载失败'))
+    }
     return null
   } finally {
     if (generation === quoteGeneration) loadingQuote.value = false
@@ -734,6 +755,7 @@ watch(
     loadingDurations.value = false
     loadingQuote.value = false
     form.serviceCode = ''
+    priceLoadFailed.value = false
     form.tier = ''
     form.countryCode = ''
     form.duration = ''
@@ -1159,7 +1181,7 @@ onBeforeUnmount(() => {
               :model-value="form.priceSelection"
               :loading="loadingQuote"
               :disabled="purchasing || !priceOptions.length || loadingQuote"
-              :placeholder="loadingQuote ? '正在刷新价格' : priceOptions.length ? '请选择最新价格' : '选择国家后加载价格'"
+              :placeholder="priceSelectionPlaceholder"
               style="width: 100%"
               @change="selectPrice"
             >
