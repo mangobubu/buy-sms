@@ -12,7 +12,7 @@ import { ordersApi } from '@/api/orders'
 import { errorMessage } from '@/api/http'
 import type { NumberOrder, OrderQuery, PageResult, RenewalOption, RenewalOptions } from '@/types/api'
 import { presentCancelPolicy, type CancelPresentation } from '@/utils/cancel-policy'
-import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, getPhoneNumberParts, providerName } from '@/utils/format'
+import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, getPhoneNumberParts, providerName, smsBowerTierLabel } from '@/utils/format'
 import { isTerminalOrderStatus } from '@/utils/countdown'
 import { formatRenewalDuration, isRenewalCandidate, renewalOptionKey } from '@/utils/renewal-policy'
 import {
@@ -530,6 +530,7 @@ onBeforeUnmount(() => {
             <div class="stacked-cell">
               <strong>{{ scope.row.providerName || providerName(scope.row.provider) }}</strong>
               <small>{{ scope.row.serviceName || '服务代码：' + scope.row.serviceCode }}</small>
+              <small v-if="scope.row.provider === 'smsbower' && smsBowerTierLabel(scope.row.tier)">等级：{{ smsBowerTierLabel(scope.row.tier) }}</small>
               <small v-if="scope.row.provider === 'herosms'">时长：{{ formatPurchaseDuration(scope.row.duration) }}</small>
             </div>
           </template>
@@ -609,6 +610,7 @@ onBeforeUnmount(() => {
           <div>
             <PhoneNumberCopy :value="order.phoneNumber" />
             <small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small>
+            <small v-if="order.provider === 'smsbower' && smsBowerTierLabel(order.tier)">等级：{{ smsBowerTierLabel(order.tier) }}</small>
             <small v-if="order.provider === 'herosms'">时长：{{ formatPurchaseDuration(order.duration) }}</small>
           </div>
           <OrderStatusTag :status="order.status" />
@@ -742,3 +744,4 @@ onBeforeUnmount(() => {
     </el-dialog>
   </div>
 </template>
+

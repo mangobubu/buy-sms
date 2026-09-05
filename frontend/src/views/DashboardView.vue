@@ -9,7 +9,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import { dashboardApi } from '@/api/dashboard'
 import { errorMessage } from '@/api/http'
 import type { DashboardOverview } from '@/types/api'
-import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, providerName } from '@/utils/format'
+import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, providerName, smsBowerTierLabel } from '@/utils/format'
 import { useSecondNow } from '@/composables/useSecondNow'
 
 const route = useRoute()
@@ -161,6 +161,7 @@ onBeforeUnmount(() => {
             <span class="recent-order-main">
               <strong>{{ formatPhoneNumber(order.phoneNumber) }}</strong>
               <small>{{ order.providerName || providerName(order.provider) }} · {{ order.serviceName || '服务代码：' + order.serviceCode }}</small>
+              <small v-if="order.provider === 'smsbower' && smsBowerTierLabel(order.tier)">等级：{{ smsBowerTierLabel(order.tier) }}</small>
               <small v-if="order.provider === 'herosms'">时长：{{ formatPurchaseDuration(order.duration) }}</small>
             </span>
             <span class="recent-order-timing">
@@ -220,3 +221,4 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+

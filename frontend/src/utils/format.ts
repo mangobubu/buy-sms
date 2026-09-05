@@ -1,4 +1,4 @@
-import type { ProviderCode } from '../types/api'
+import type { ProviderCode, SmsBowerTier } from '../types/api'
 
 export const providerNames: Record<ProviderCode, string> = {
   herosms: 'HeroSMS',
@@ -8,6 +8,11 @@ export const providerNames: Record<ProviderCode, string> = {
 
 export function providerName(code?: string): string {
   return providerNames[code as ProviderCode] || code || '未知平台'
+}
+
+export function smsBowerTierLabel(tier?: SmsBowerTier | string): string {
+  const labels: Record<string, string> = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold' }
+  return labels[tier?.trim().toLowerCase() || ''] || ''
 }
 
 export function formatDateTime(value?: string): string {
@@ -101,3 +106,4 @@ export function formatPhoneNumber(phone?: string): string {
 export function maskPhone(phone?: string): string {
   return phone || '号码分配中'
 }
+
