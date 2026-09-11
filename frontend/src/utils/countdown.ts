@@ -3,9 +3,10 @@ export type OrderCountdownState = 'active' | 'confirming' | 'expired' | 'ended' 
 export interface OrderCountdownDisplay {
   state: OrderCountdownState
   text: string
+  hint?: string
 }
 
-const terminalStatuses = new Set(['settled', 'completed', 'cancelled', 'expired', 'failed'])
+const terminalStatuses = new Set(['settled', 'completed', 'cancelled', 'canceled', 'expired', 'failed'])
 
 export function isTerminalOrderStatus(status?: string): boolean {
   return terminalStatuses.has(status?.trim().toLowerCase() ?? '')
@@ -26,20 +27,29 @@ export function getOrderCountdown(
   status: string | undefined,
   expiresAt: string | undefined,
   nowMs = Date.now(),
+  provider?: string,
+  createdAt?: string,
 ): OrderCountdownDisplay {
   const normalizedStatus = status?.trim().toLowerCase() ?? ''
   if (normalizedStatus === 'expired') return { state: 'expired', text: '已到期' }
   if (isTerminalOrderStatus(normalizedStatus)) return { state: 'ended', text: '已结束' }
 
-  if (!expiresAt) return { state: 'unknown', text: '等待平台同步' }
-  const expiresAtMs = Date.parse(expiresAt)
+  let expiresAtMs = Date.parse(expiresAt ?? '')
+  let hint: string | undefined
+  if (provider?.trim().toLowerCase() === 'smsbower') {
+    const createdAtMs = Date.parse(createdAt ?? '')
+    if (Number.isFinite(createdAtMs)) {
+      const ruleDeadlineMs = createdAtMs + 25 * 60 * 1_000
+      expiresAtMs = Number.isFinite(expiresAtMs) ? Math.min(expiresAtMs, ruleDeadlineMs) : ruleDeadlineMs
+      hint = '购买满25分钟后，收到短信自动完成，未收到短信自动取消；处理结果以平台确认为准。'
+    }
+  }
   if (!Number.isFinite(expiresAtMs)) return { state: 'unknown', text: '等待平台同步' }
 
   const remainingMs = expiresAtMs - nowMs
-  if (remainingMs <= 0) return { state: 'confirming', text: '状态确认中' }
-
-  return {
-    state: 'active',
-    text: formatCountdownDuration(remainingMs / 1_000),
-  }
+  const countdown: OrderCountdownDisplay = remainingMs <= 0
+    ? { state: 'confirming', text: '状态确认中' }
+    : { state: 'active', text: formatCountdownDuration(remainingMs / 1_000) }
+  if (hint) countdown.hint = hint
+  return countdown
 }

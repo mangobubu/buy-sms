@@ -4,12 +4,14 @@ import { Timer } from '@element-plus/icons-vue'
 import { getOrderCountdown } from '@/utils/countdown'
 
 const props = defineProps<{
+  provider?: string
   status?: string
   expiresAt?: string
+  createdAt?: string
   now: number
 }>()
 
-const countdown = computed(() => getOrderCountdown(props.status, props.expiresAt, props.now))
+const countdown = computed(() => getOrderCountdown(props.status, props.expiresAt, props.now, props.provider, props.createdAt))
 const caption = computed(() => countdown.value.state === 'active' ? '剩余' : '时效')
 </script>
 
@@ -18,6 +20,7 @@ const caption = computed(() => countdown.value.state === 'active' ? '剩余' : '
     class="order-countdown"
     :class="`is-${countdown.state}`"
     :aria-label="`${caption}${countdown.text}`"
+    :title="countdown.hint"
   >
     <el-icon><Timer /></el-icon>
     <span>{{ caption }}</span>

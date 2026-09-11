@@ -54,6 +54,7 @@ type Repository interface {
 	WithOrderLock(context.Context, string, func(context.Context) error) error
 	SetOrderStatus(context.Context, string, string, string) error
 	ClaimDueOrders(context.Context, int, time.Time, time.Duration) ([]domain.Order, error)
+	RescheduleClaimedOrderPoll(context.Context, string, string, time.Time, time.Time) error
 	UpdatePoll(context.Context, string, string, time.Time, int) error
 	UpdateOrderExpiresAt(context.Context, string, time.Time) error
 	GetRenewalRequest(context.Context, string, string) (RenewalRecord, error)

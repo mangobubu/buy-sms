@@ -27,9 +27,16 @@ const (
 	PollRefunded     = "refunded"
 	PollUnknown      = "unknown"
 
+	// PollMissing 表示标准状态接口已确认订单不存在；本身不表示退款或完成。
+	PollMissing = "missing"
+
 	// CodeCancelNotAvailableYet 统一表示供应商仍处于短暂取消锁定期。
 	// 原始响应正文不会保存在 ProviderError 中。
 	CodeCancelNotAvailableYet = "CANCEL_NOT_AVAILABLE_YET"
+
+	// CodeActivationMissing 仅在 SMSBower 完成失败后，通过 getStatus 再次
+	// 确认 NO_ACTIVATION 时返回，不能与未经确认的原始错误等同。
+	CodeActivationMissing = "ACTIVATION_MISSING"
 
 	defaultTimeout = 15 * time.Second
 )

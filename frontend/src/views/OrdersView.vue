@@ -73,6 +73,12 @@ let pollTimer: number | undefined
 let requestInFlight = false
 let pendingReload: { silent: boolean } | null = null
 let activeLoadPromise: Promise<void> | null = null
+let mutationRevision = 0
+
+function applyOrderMutation(updatedOrder: NumberOrder): void {
+  mutationRevision += 1
+  orders.value = orders.value.map((order) => order.id === updatedOrder.id ? updatedOrder : order)
+}
 
 function normalizeResult(result: PageResult<NumberOrder> | NumberOrder[]): void {
   if (Array.isArray(result)) {
@@ -95,8 +101,12 @@ async function drainLoads(initialIntent: { silent: boolean }): Promise<void> {
       if (currentIntent.silent) refreshing.value = true
       else loading.value = true
       try {
-        normalizeResult(await ordersApi.list({ ...query }))
-        lastRefreshedAt.value = new Date()
+        const requestRevision = mutationRevision
+        const result = await ordersApi.list({ ...query })
+        if (requestRevision === mutationRevision) {
+          normalizeResult(result)
+          lastRefreshedAt.value = new Date()
+        }
       } catch (reason) {
         if (!currentIntent.silent) ElMessage.error(errorMessage(reason, '订单加载失败'))
       }
@@ -334,11 +344,12 @@ async function completeOrder(order: NumberOrder): Promise<void> {
   actionOrderId.value = order.id
   actionType.value = 'complete'
   try {
-    await ordersApi.complete(order.id)
+    applyOrderMutation(await ordersApi.complete(order.id))
     ElMessage.success('订单已完成结算')
     await load({ silent: true })
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '完成订单失败'))
+    await load({ silent: true })
   } finally {
     actionOrderId.value = ''
     actionType.value = ''
@@ -358,7 +369,7 @@ async function cancelOrder(order: NumberOrder): Promise<void> {
   actionOrderId.value = order.id
   actionType.value = 'cancel'
   try {
-    await ordersApi.cancel(order.id)
+    applyOrderMutation(await ordersApi.cancel(order.id))
     ElMessage.success('号码已取消')
     await load({ silent: true })
   } catch (reason) {
@@ -551,7 +562,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="号码时效" min-width="145">
           <template #default="scope">
-            <OrderCountdown :status="scope.row.status" :expires-at="scope.row.expiresAt" :now="countdownNow" />
+            <OrderCountdown :provider="scope.row.provider" :status="scope.row.status" :expires-at="scope.row.expiresAt" :created-at="scope.row.createdAt" :now="countdownNow" />
           </template>
         </el-table-column>
         <el-table-column label="创建时间" min-width="145">
@@ -617,7 +628,7 @@ onBeforeUnmount(() => {
         </header>
         <div class="mobile-order-countdown">
           <span>号码有效期</span>
-          <OrderCountdown :status="order.status" :expires-at="order.expiresAt" :now="countdownNow" />
+          <OrderCountdown :provider="order.provider" :status="order.status" :expires-at="order.expiresAt" :created-at="order.createdAt" :now="countdownNow" />
         </div>
         <div class="mobile-order-meta">
           <span>{{ order.countryName || '国家代码：' + order.countryCode }}</span>

@@ -1527,6 +1527,7 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 			return err
 		}
 		status := domain.OrderCompleted
+		providerState := "user_" + action
 		if action == "cancel" {
 			err = cancelProviderOrder(lockCtx, client, key, o.UpstreamID, o.Duration)
 			s.invalidateProviderBalance(o.ProviderID)
@@ -1538,10 +1539,14 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 			err = completeProviderOrder(lockCtx, client, key, o.UpstreamID, o.Duration)
 			s.invalidateProviderBalance(o.ProviderID)
 			if err != nil {
-				return orderActionProviderError(action, err)
+				if !canCompleteMissingSMSBowerActivation(o, err) {
+					logOrderCompleteFailure(o.ID, err)
+					return orderActionProviderError(action, err)
+				}
+				providerState = "upstream_missing"
 			}
 		}
-		if err = s.repo.SetOrderStatus(lockCtx, o.ID, status, "user_"+action); err != nil {
+		if err = s.repo.SetOrderStatus(lockCtx, o.ID, status, providerState); err != nil {
 			return mapStore(err)
 		}
 		_ = s.repo.Audit(lockCtx, &user.ID, "order."+action, "order", o.ID, ip, nil)
@@ -2088,13 +2093,19 @@ func (s *Service) pollOne(ctx context.Context, snapshot domain.Order) {
 			return getErr
 		}
 		if !pollSnapshotCurrent(snapshot, fresh) {
+			if smsBowerDeadlineSnapshotChanged(snapshot, fresh) {
+				s.rescheduleSMSBowerDeadlinePoll(lockCtx, snapshot)
+			}
 			return nil
 		}
-		requestOrder, getErr = s.applyPollResultLocked(lockCtx, fresh, p, result)
+		requestOrder, getErr = s.applyPollResultLocked(lockCtx, fresh, p, key, client, result)
 		return getErr
 	})
 	if lockErr != nil && !errors.Is(lockErr, store.ErrConflict) {
 		slog.Warn("应用轮询结果失败", "order_id", snapshot.ID, "error", lockErr)
+	}
+	if errors.Is(lockErr, store.ErrConflict) {
+		s.rescheduleSMSBowerDeadlinePoll(ctx, snapshot)
 	}
 	if requestOrder != nil {
 		s.requestAnother(ctx, *requestOrder)
@@ -2111,6 +2122,9 @@ func (s *Service) applyPollFailure(ctx context.Context, snapshot domain.Order, s
 			return getErr
 		}
 		if !pollSnapshotCurrent(snapshot, fresh) {
+			if smsBowerDeadlineSnapshotChanged(snapshot, fresh) {
+				s.rescheduleSMSBowerDeadlinePoll(lockCtx, snapshot)
+			}
 			return nil
 		}
 		if locallyExpired {
@@ -2122,6 +2136,9 @@ func (s *Service) applyPollFailure(ctx context.Context, snapshot domain.Order, s
 	if err != nil && !errors.Is(err, store.ErrConflict) {
 		slog.Warn("应用轮询失败状态失败", "order_id", snapshot.ID, "error", err)
 	}
+	if errors.Is(err, store.ErrConflict) {
+		s.rescheduleSMSBowerDeadlinePoll(ctx, snapshot)
+	}
 }
 
 func pollSnapshotCurrent(snapshot, fresh domain.Order) bool {
@@ -2130,7 +2147,11 @@ func pollSnapshotCurrent(snapshot, fresh domain.Order) bool {
 	}
 	return snapshot.UpdatedAt.IsZero() || !fresh.UpdatedAt.After(snapshot.UpdatedAt)
 }
-func (s *Service) applyPollResultLocked(ctx context.Context, o domain.Order, p domain.Provider, result provider.PollResult) (*domain.Order, error) {
+func (s *Service) applyPollResultLocked(ctx context.Context, o domain.Order, p domain.Provider, key string, client provider.Client, result provider.PollResult) (*domain.Order, error) {
+	if o.ProviderID == domain.ProviderSMSBower && result.State == provider.PollMissing && hasCurrentActivationMessage(o) {
+		// 上游确认缺失且本次已收码时收口订单；不改变金额或短信，也不表示退款。
+		return nil, s.repo.SetOrderStatus(ctx, o.ID, domain.OrderCompleted, "upstream_missing")
+	}
 	locallyExpired := o.ExpiresAt != nil && !o.ExpiresAt.After(s.now())
 	var expiryUpdateErr error
 	if result.ExpiresAt != nil {
@@ -2201,15 +2222,23 @@ func (s *Service) applyPollResultLocked(ctx context.Context, o domain.Order, p d
 	if locallyExpired {
 		return nil, s.repo.SetOrderStatus(ctx, o.ID, domain.OrderExpired, "local_expired")
 	}
+	if o.ProviderID == domain.ProviderSMSBower && result.State == provider.PollMissing {
+		// 未收到本次激活的短信时维持原失败退避，不触发继续接码或主动结束。
+		s.pollFailure(ctx, o, "upstream_missing")
+		return nil, nil
+	}
 	if expiryUpdateErr != nil {
 		s.pollFailure(ctx, o, "database_error")
 		return nil, nil
+	}
+	if handled, err := s.autoFinishSMSBowerLocked(ctx, o, key, client, result, state); handled {
+		return nil, err
 	}
 	interval := time.Duration(readSettings(p.Config).PollingIntervalSeconds) * time.Second
 	if o.ProviderID != domain.ProviderSMSPool && interval < 30*time.Second {
 		interval = 30 * time.Second
 	}
-	_ = s.repo.UpdatePoll(ctx, o.ID, state, nextPollAt(s.now().Add(interval), o.ExpiresAt), 0)
+	_ = s.repo.UpdatePoll(ctx, o.ID, state, nextSuccessfulPollAt(o, s.now().Add(interval)), 0)
 	if insertedAny && result.CanRequestAnother {
 		o.PollSequence = sequence
 		o.RequestNextPending = true
@@ -2254,7 +2283,7 @@ func (s *Service) requestAnother(parent context.Context, o domain.Order) {
 		if err != nil {
 			return err
 		}
-		if fresh.Terminal() || !fresh.RequestNextPending || fresh.RequestNextInflight {
+		if fresh.Terminal() || !fresh.RequestNextPending || fresh.RequestNextInflight || smsBowerAutoFinishDue(fresh, s.now()) {
 			return nil
 		}
 		claimed, err := s.repo.ClaimRequestNext(lockCtx, fresh.ID)

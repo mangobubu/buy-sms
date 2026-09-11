@@ -366,7 +366,14 @@ func (c *smsActivateClient) setStatus(ctx context.Context, apiKey, upstreamID, s
 	if businessErr := c.businessError(operation, apiKey, payload); businessErr != nil {
 		return businessErr
 	}
-	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(string(payload))), "ACCESS_") {
+	response := strings.ToUpper(strings.TrimSpace(string(payload)))
+	if !strings.HasPrefix(response, "ACCESS_") {
+		return c.http.failure(operation, "INVALID_RESPONSE", 0, false, nil)
+	}
+	// SMSBower 的自动结束动作必须收到对应的确认，不能把取消回执当成
+	// 完成成功（反之亦然）。不匹配时交给后续状态轮询确认实际结果。
+	if c.providerID == domain.ProviderSMSBower &&
+		(status == "6" && response != "ACCESS_ACTIVATION" || status == "8" && response != "ACCESS_CANCEL") {
 		return c.http.failure(operation, "INVALID_RESPONSE", 0, false, nil)
 	}
 	return nil

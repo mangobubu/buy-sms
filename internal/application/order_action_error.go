@@ -2,8 +2,10 @@ package application
 
 import (
 	"errors"
+	"log/slog"
 	"strings"
 
+	"buysms/internal/domain"
 	"buysms/internal/provider"
 )
 
@@ -85,6 +87,44 @@ func orderActionProviderError(action string, cause error) *OrderActionError {
 		Message: "供应商暂时不可用，请稍后重试",
 		Kind:    ErrProvider,
 		Cause:   cause,
+	}
+}
+
+func canCompleteMissingSMSBowerActivation(order domain.Order, err error) bool {
+	if order.ProviderID != domain.ProviderSMSBower || order.Status != domain.OrderActive ||
+		order.RenewalInflight || !hasCurrentActivationMessage(order) {
+		return false
+	}
+	var upstream *provider.ProviderError
+	return errors.As(err, &upstream) && upstream != nil &&
+		upstream.Provider == domain.ProviderSMSBower && upstream.Operation == "complete" &&
+		upstream.Code == provider.CodeActivationMissing && upstream.HTTPStatus == 0 && !upstream.Retryable
+}
+
+func logOrderCompleteFailure(orderID string, err error) {
+	fields := []any{"order_id", orderID}
+	var upstream *provider.ProviderError
+	if errors.As(err, &upstream) && upstream != nil {
+		// 只记录 ProviderError 的脱敏结构字段，绝不记录原始错误链或响应正文。
+		fields = append(fields, "provider", upstream.Provider, "operation", upstream.Operation,
+			"code", safeOrderCompleteLogCode(upstream.Code), "http_status", upstream.HTTPStatus, "retryable", upstream.Retryable)
+	}
+	slog.Warn("完成订单失败", fields...)
+}
+
+func safeOrderCompleteLogCode(code string) string {
+	// HTTP 错误体的 error/code 字段仍可能包含手机号或短信；只记录已知固定码。
+	switch code {
+	case provider.CodeActivationMissing, provider.CodeCancelNotAvailableYet,
+		"BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_STATUS", "BAD_DURATION",
+		"WRONG_SERVICE", "WRONG_COUNTRY", "NO_NUMBERS", "NO_BALANCE", "NO_ACTIVATION",
+		"EARLY_CANCEL_DENIED", "WRONG_MAX_PRICE", "MAX_PRICE_EXCEEDED", "ACCOUNT_INACTIVE",
+		"BANNED", "ERROR_SQL", "NO_CONNECTION", "RATE_LIMIT", "INVALID_BASE_URL",
+		"INVALID_REQUEST", "TIMEOUT", "CANCELED", "TRANSPORT_ERROR", "READ_ERROR",
+		"RESPONSE_TOO_LARGE", "INVALID_RESPONSE", "UPSTREAM_ERROR":
+		return code
+	default:
+		return "UPSTREAM_ERROR"
 	}
 }
 

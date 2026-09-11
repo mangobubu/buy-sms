@@ -79,6 +79,16 @@ func (r *terminalLockRepository) SetOrderStatus(_ context.Context, id, status, p
 	return nil
 }
 
+func (r *terminalLockRepository) RescheduleClaimedOrderPoll(_ context.Context, id, upstreamID string, leaseAt, next time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.order.ID == id && r.order.UpstreamID == upstreamID && r.order.Status == domain.OrderActive &&
+		!r.order.RenewalInflight && r.order.NextPollAt.Equal(leaseAt) && next.Before(r.order.NextPollAt) {
+		r.order.NextPollAt = next
+	}
+	return nil
+}
+
 func (r *terminalLockRepository) Audit(context.Context, *string, string, string, string, string, json.RawMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

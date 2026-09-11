@@ -165,7 +165,7 @@ onBeforeUnmount(() => {
               <small v-if="order.provider === 'herosms'">时长：{{ formatPurchaseDuration(order.duration) }}</small>
             </span>
             <span class="recent-order-timing">
-              <OrderCountdown :status="order.status" :expires-at="order.expiresAt" :now="countdownNow" />
+              <OrderCountdown :provider="order.provider" :status="order.status" :expires-at="order.expiresAt" :created-at="order.createdAt" :now="countdownNow" />
               <time>{{ formatDateTime(order.updatedAt || order.createdAt) }}</time>
             </span>
             <span class="message-count">{{ order.messages?.length || 0 }} 条短信</span>

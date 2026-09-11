@@ -691,15 +691,21 @@ func (s *Postgres) ClaimDueOrders(ctx context.Context, limit int, now time.Time,
 		out = append(out, o)
 	}
 	rows.Close()
-	for _, o := range out {
-		if _, err = tx.Exec(ctx, `UPDATE orders SET next_poll_at=$2 WHERE id=$1`, o.ID, now.Add(lease)); err != nil {
+	for index := range out {
+		leaseAt := now.Add(lease)
+		if _, err = tx.Exec(ctx, `UPDATE orders SET next_poll_at=$2 WHERE id=$1`, out[index].ID, leaseAt); err != nil {
 			return nil, err
 		}
+		out[index].NextPollAt = leaseAt
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+func (s *Postgres) RescheduleClaimedOrderPoll(ctx context.Context, id, upstreamID string, leaseAt, next time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE orders SET next_poll_at=LEAST(next_poll_at,$4) WHERE id=$1 AND upstream_id=$2 AND status='active' AND renewal_inflight=false AND next_poll_at=$3`, id, upstreamID, leaseAt, next)
+	return err
 }
 func (s *Postgres) UpdatePoll(ctx context.Context, id, state string, next time.Time, fail int) error {
 	_, err := s.pool.Exec(ctx, `UPDATE orders SET last_provider_state=$2,next_poll_at=$3,poll_failures=$4,updated_at=now() WHERE id=$1 AND status='active'`, id, state, next, fail)
