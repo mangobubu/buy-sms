@@ -465,6 +465,7 @@ func respondError(c *gin.Context, err error) {
 		status := http.StatusBadGateway
 		switch actionErr.Code {
 		case application.OrderActionCodeCancelNotAvailableYet, application.OrderActionCodeCancelNotAllowed,
+			application.OrderActionCodeCompleteStatusConflict,
 			application.OrderActionCodeRenewalNotAvailable, application.OrderActionCodeRenewalPriceChanged,
 			application.OrderActionCodeRenewalInProgress,
 			application.OrderActionCodeRenewalIdempotencyMismatch:

@@ -138,12 +138,12 @@ func TestSMSBowerCompleteRequiresMissingConfirmation(t *testing.T) {
 			replies: []smsBowerLifecycleReply{{"setStatus", 0, "NO_ACTIVATION"}, {"getStatus", 0, "STATUS_OK:123456"}},
 		},
 		{
-			name: "取消不能冒充完成", code: "NO_ACTIVATION",
+			name: "确认取消返回实际终态而非完成成功", code: CodeActivationTerminal,
 			replies: []smsBowerLifecycleReply{{"setStatus", 0, "NO_ACTIVATION"}, {"getStatus", 0, "STATUS_CANCEL"}},
 		},
 		{
-			name: "状态不匹配不是缺失", code: "BAD_STATUS",
-			replies: []smsBowerLifecycleReply{{"setStatus", 0, "BAD_STATUS"}},
+			name: "状态不匹配确认仍有效则保留错误", code: "BAD_STATUS",
+			replies: []smsBowerLifecycleReply{{"setStatus", 0, "BAD_STATUS"}, {"getStatus", 0, "STATUS_WAIT_CODE"}},
 		},
 		{
 			name: "确认时限流不能收口", code: "NO_ACTIVATION",

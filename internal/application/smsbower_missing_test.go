@@ -80,13 +80,14 @@ func TestSMSBowerFinishMissingActivation(t *testing.T) {
 		wantState    string
 		wantConfirms int32
 		wantError    bool
+		wantConflict bool
 	}{
 		{name: "confirmed missing with current message", message: "current", finishBody: "NO_ACTIVATION", confirmBody: "NO_ACTIVATION", wantStatus: domain.OrderCompleted, wantState: "upstream_missing", wantConfirms: 1},
-		{name: "confirmed missing without messages", finishBody: "NO_ACTIVATION", confirmBody: "NO_ACTIVATION", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true},
-		{name: "historical message does not complete new activation", message: "historical", finishBody: "NO_ACTIVATION", confirmBody: "NO_ACTIVATION", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true},
+		{name: "confirmed missing without messages", finishBody: "NO_ACTIVATION", confirmBody: "NO_ACTIVATION", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true, wantConflict: true},
+		{name: "historical message does not complete new activation", message: "historical", finishBody: "NO_ACTIVATION", confirmBody: "NO_ACTIVATION", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true, wantConflict: true},
 		{name: "raw missing but activation still exists", message: "current", finishBody: "NO_ACTIVATION", confirmBody: "STATUS_WAIT_CODE", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true},
 		{name: "confirmation failed", message: "current", finishBody: "NO_ACTIVATION", confirmBody: "BAD_KEY", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true},
-		{name: "ordinary provider failure", message: "current", finishBody: "BAD_STATUS", wantStatus: domain.OrderActive, wantError: true},
+		{name: "state conflict while activation still exists", message: "current", finishBody: "BAD_STATUS", confirmBody: "STATUS_WAIT_CODE", wantStatus: domain.OrderActive, wantConfirms: 1, wantError: true, wantConflict: true},
 		{name: "HTTP failure is not missing proof", message: "current", finishBody: "NO_ACTIVATION", finishHTTP: http.StatusServiceUnavailable, wantStatus: domain.OrderActive, wantError: true},
 		{name: "regular completion keeps user state", message: "current", finishBody: "ACCESS_ACTIVATION", wantStatus: domain.OrderCompleted, wantState: "user_complete"},
 	} {
@@ -121,7 +122,11 @@ func TestSMSBowerFinishMissingActivation(t *testing.T) {
 				}
 			}))
 			view, err := service.FinishOrder(context.Background(), order.ID, "complete", domain.User{ID: order.UserID, Role: "operator"}, "127.0.0.1")
-			if (err != nil) != tt.wantError || tt.wantError && !errors.Is(err, ErrProvider) {
+			wantKind := ErrProvider
+			if tt.wantConflict {
+				wantKind = ErrConflict
+			}
+			if (err != nil) != tt.wantError || tt.wantError && !errors.Is(err, wantKind) {
 				t.Fatalf("completion error=%v, wantError=%v", err, tt.wantError)
 			}
 			after, transitions, audits, locks := repo.snapshot()
@@ -204,7 +209,7 @@ func TestSMSBowerAutoFinishMissingActivation(t *testing.T) {
 }
 
 func TestSMSBowerMissingCompletionRequiresStrictProof(t *testing.T) {
-	confirmed := provider.ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete", Code: provider.CodeActivationMissing}
+	confirmed := provider.ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete", Code: provider.CodeActivationMissing, ConfirmationState: provider.PollMissing}
 	for _, tt := range []struct {
 		name   string
 		change func(*domain.Order, *provider.ProviderError)
@@ -216,6 +221,8 @@ func TestSMSBowerMissingCompletionRequiresStrictProof(t *testing.T) {
 		{name: "other error provider", change: func(_ *domain.Order, e *provider.ProviderError) { e.Provider = domain.ProviderSMSPool }},
 		{name: "other operation", change: func(_ *domain.Order, e *provider.ProviderError) { e.Operation = "poll" }},
 		{name: "raw missing error", change: func(_ *domain.Order, e *provider.ProviderError) { e.Code = "NO_ACTIVATION" }},
+		{name: "missing confirmation state", change: func(_ *domain.Order, e *provider.ProviderError) { e.ConfirmationState = "" }},
+		{name: "wrong confirmation state", change: func(_ *domain.Order, e *provider.ProviderError) { e.ConfirmationState = provider.PollWaiting }},
 		{name: "HTTP failure", change: func(_ *domain.Order, e *provider.ProviderError) { e.HTTPStatus = http.StatusBadGateway }},
 		{name: "retryable error", change: func(_ *domain.Order, e *provider.ProviderError) { e.Retryable = true }},
 	} {

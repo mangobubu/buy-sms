@@ -1,8 +1,10 @@
 package application
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"buysms/internal/domain"
@@ -12,6 +14,7 @@ import (
 const (
 	OrderActionCodeCancelNotAvailableYet      = "cancel_not_available_yet"
 	OrderActionCodeCancelNotAllowed           = "cancel_not_allowed"
+	OrderActionCodeCompleteStatusConflict     = "complete_status_conflict"
 	OrderActionCodeRenewalIdempotencyMismatch = "renewal_idempotency_mismatch"
 	OrderActionCodeRenewalNotAvailable        = "renewal_not_available"
 	OrderActionCodeRenewalPriceChanged        = "renewal_price_changed"
@@ -61,6 +64,11 @@ func cancelPolicyError(decision CancelDecision) *OrderActionError {
 }
 
 func orderActionProviderError(action string, cause error) *OrderActionError {
+	if action == "complete" {
+		if completionErr := smsBowerCompletionError(cause); completionErr != nil {
+			return completionErr
+		}
+	}
 	if action == "cancel" && providerCancelNotAvailableYet(cause) {
 		return &OrderActionError{
 			Action:  action,
@@ -91,31 +99,150 @@ func orderActionProviderError(action string, cause error) *OrderActionError {
 }
 
 func canCompleteMissingSMSBowerActivation(order domain.Order, err error) bool {
+	_, state, confirmed := confirmedSMSBowerCompletion(order, err)
+	return confirmed && state == "upstream_missing"
+}
+
+func confirmedSMSBowerCompletion(order domain.Order, err error) (status, state string, confirmed bool) {
 	if order.ProviderID != domain.ProviderSMSBower || order.Status != domain.OrderActive ||
-		order.RenewalInflight || !hasCurrentActivationMessage(order) {
-		return false
+		order.RenewalInflight {
+		return "", "", false
 	}
 	var upstream *provider.ProviderError
-	return errors.As(err, &upstream) && upstream != nil &&
-		upstream.Provider == domain.ProviderSMSBower && upstream.Operation == "complete" &&
-		upstream.Code == provider.CodeActivationMissing && upstream.HTTPStatus == 0 && !upstream.Retryable
+	if !errors.As(err, &upstream) || upstream == nil || upstream.Provider != domain.ProviderSMSBower ||
+		upstream.Operation != "complete" || upstream.HTTPStatus != 0 || upstream.Retryable {
+		return "", "", false
+	}
+	if upstream.Code == provider.CodeActivationMissing && upstream.ConfirmationState == provider.PollMissing &&
+		hasCurrentActivationMessage(order) {
+		return domain.OrderCompleted, "upstream_missing", true
+	}
+	if upstream.Code != provider.CodeActivationTerminal {
+		return "", "", false
+	}
+	switch upstream.ConfirmationState {
+	case provider.PollCanceled:
+		return domain.OrderCanceled, "upstream_canceled", true
+	case provider.PollExpired:
+		return domain.OrderExpired, "upstream_expired", true
+	case provider.PollCompleted:
+		return domain.OrderCompleted, "upstream_completed", true
+	case provider.PollRefunded:
+		return domain.OrderCanceled, "upstream_refunded", true
+	default:
+		return "", "", false
+	}
+}
+
+func orderFinishAudit(action, source, status, providerState string) (string, json.RawMessage) {
+	event := "order." + action
+	if source == "auto" {
+		event = "order.auto_" + action
+	}
+	if action != "complete" || providerState == "upstream_missing" || !strings.HasPrefix(providerState, "upstream_") {
+		return event, nil
+	}
+	// 查询得知的真实终态只做本地同步；不能审计为执行过取消、退款或完成。
+	meta, _ := json.Marshal(map[string]string{
+		"requestedAction": action, "source": source, "status": status, "providerState": providerState,
+	})
+	return "order.reconcile", meta
+}
+
+func smsBowerCompletionError(cause error) *OrderActionError {
+	var upstream *provider.ProviderError
+	if !errors.As(cause, &upstream) || upstream == nil || upstream.Provider != domain.ProviderSMSBower ||
+		(upstream.Operation != "complete" && upstream.Operation != "complete.confirm") {
+		return nil
+	}
+	code := safeOrderCompleteLogCode(upstream.Code)
+	detail := code
+	if state := safeCompletionConfirmationState(upstream.ConfirmationState); state != "" {
+		detail += "；上游状态：" + completionConfirmationStateLabel(state) + "（" + state + "）"
+	}
+	if upstream.Operation == "complete" && !upstream.Retryable {
+		if upstream.Code == "BAD_STATUS" && (upstream.HTTPStatus == 0 || upstream.HTTPStatus == http.StatusBadRequest ||
+			upstream.HTTPStatus == http.StatusConflict || upstream.HTTPStatus == http.StatusUnprocessableEntity) {
+			return &OrderActionError{
+				Action: "complete", Code: OrderActionCodeCompleteStatusConflict, Kind: ErrConflict, Cause: cause,
+				Message: "SMSBower 当前订单状态不允许完成（" + detail + "），请核对供应商订单",
+			}
+		}
+		if upstream.Code == provider.CodeActivationMissing && upstream.ConfirmationState == provider.PollMissing && upstream.HTTPStatus == 0 {
+			return &OrderActionError{
+				Action: "complete", Code: OrderActionCodeCompleteStatusConflict, Kind: ErrConflict, Cause: cause,
+				Message: "SMSBower 已确认上游订单不存在，但本次激活尚无短信记录，无法确认完成（" + code + "）",
+			}
+		}
+	}
+	stage := "完成请求"
+	if upstream.Operation == "complete.confirm" {
+		stage = "完成状态确认"
+	}
+	return &OrderActionError{
+		Action: "complete", Code: OrderActionCodeProviderError, Kind: ErrProvider, Cause: cause,
+		Message: "SMSBower " + stage + "失败（" + detail + "），订单未确认结束，请稍后重试",
+	}
+}
+
+func safeCompletionConfirmationState(state string) string {
+	switch state {
+	case provider.PollWaiting, provider.PollWaitingRetry, provider.PollReceived, provider.PollProcessing,
+		provider.PollUnknown, provider.PollCanceled, provider.PollExpired, provider.PollCompleted,
+		provider.PollRefunded, provider.PollMissing:
+		return state
+	default:
+		return ""
+	}
+}
+
+func completionConfirmationStateLabel(state string) string {
+	switch state {
+	case provider.PollWaiting:
+		return "等待短信"
+	case provider.PollWaitingRetry:
+		return "等待下一条短信"
+	case provider.PollReceived:
+		return "已收到短信"
+	case provider.PollProcessing:
+		return "处理中"
+	case provider.PollCanceled:
+		return "已取消"
+	case provider.PollExpired:
+		return "已过期"
+	case provider.PollCompleted:
+		return "已完成"
+	case provider.PollRefunded:
+		return "已退款"
+	case provider.PollMissing:
+		return "订单不存在"
+	default:
+		return "未知"
+	}
 }
 
 func logOrderCompleteFailure(orderID string, err error) {
+	slog.Warn("完成订单失败", orderActionFailureFields(orderID, err)...)
+}
+
+func orderActionFailureFields(orderID string, err error) []any {
 	fields := []any{"order_id", orderID}
 	var upstream *provider.ProviderError
 	if errors.As(err, &upstream) && upstream != nil {
 		// 只记录 ProviderError 的脱敏结构字段，绝不记录原始错误链或响应正文。
 		fields = append(fields, "provider", upstream.Provider, "operation", upstream.Operation,
 			"code", safeOrderCompleteLogCode(upstream.Code), "http_status", upstream.HTTPStatus, "retryable", upstream.Retryable)
+		if state := safeCompletionConfirmationState(upstream.ConfirmationState); state != "" {
+			fields = append(fields, "confirmation_state", state)
+		}
 	}
-	slog.Warn("完成订单失败", fields...)
+	return fields
 }
 
 func safeOrderCompleteLogCode(code string) string {
 	// HTTP 错误体的 error/code 字段仍可能包含手机号或短信；只记录已知固定码。
 	switch code {
-	case provider.CodeActivationMissing, provider.CodeCancelNotAvailableYet,
+	case provider.CodeActivationMissing, provider.CodeActivationTerminal, provider.CodeCancelNotAvailableYet,
 		"BAD_KEY", "BAD_ACTION", "BAD_SERVICE", "BAD_COUNTRY", "BAD_STATUS", "BAD_DURATION",
 		"WRONG_SERVICE", "WRONG_COUNTRY", "NO_NUMBERS", "NO_BALANCE", "NO_ACTIVATION",
 		"EARLY_CANCEL_DENIED", "WRONG_MAX_PRICE", "MAX_PRICE_EXCEEDED", "ACCOUNT_INACTIVE",

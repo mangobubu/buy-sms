@@ -92,6 +92,11 @@ func TestRespondErrorOrderActionContract(t *testing.T) {
 			status: http.StatusConflict,
 		},
 		{
+			name: "完成状态冲突", code: application.OrderActionCodeCompleteStatusConflict,
+			message: "SMSBower 当前订单状态不允许完成（BAD_STATUS；上游状态：等待短信（waiting）），请核对供应商订单", kind: application.ErrConflict,
+			status: http.StatusConflict,
+		},
+		{
 			name: "续期不可用", code: application.OrderActionCodeRenewalNotAvailable,
 			message: "该号码当前没有可用的续期方案", kind: application.ErrConflict,
 			status: http.StatusConflict,

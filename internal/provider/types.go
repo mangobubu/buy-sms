@@ -37,6 +37,9 @@ const (
 	// CodeActivationMissing 仅在 SMSBower 完成失败后，通过 getStatus 再次
 	// 确认 NO_ACTIVATION 时返回，不能与未经确认的原始错误等同。
 	CodeActivationMissing = "ACTIVATION_MISSING"
+	// CodeActivationTerminal 仅在完成被拒绝后，通过标准状态接口确认终态
+	// 时返回；ConfirmationState 指示实际终态，不能一律当作完成成功。
+	CodeActivationTerminal = "ACTIVATION_TERMINAL"
 
 	defaultTimeout = 15 * time.Second
 )
@@ -178,7 +181,9 @@ type ProviderError struct {
 	Code       string
 	HTTPStatus int
 	Retryable  bool
-	cause      error
+	// ConfirmationState 只保存状态查询归一后的状态，不含短信或原始响应。
+	ConfirmationState string
+	cause             error
 }
 
 func (e *ProviderError) Error() string {

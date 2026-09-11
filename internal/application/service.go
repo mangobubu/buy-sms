@@ -1539,17 +1539,19 @@ func (s *Service) FinishOrder(ctx context.Context, id, action string, user domai
 			err = completeProviderOrder(lockCtx, client, key, o.UpstreamID, o.Duration)
 			s.invalidateProviderBalance(o.ProviderID)
 			if err != nil {
-				if !canCompleteMissingSMSBowerActivation(o, err) {
+				confirmedStatus, confirmedState, confirmed := confirmedSMSBowerCompletion(o, err)
+				if !confirmed {
 					logOrderCompleteFailure(o.ID, err)
 					return orderActionProviderError(action, err)
 				}
-				providerState = "upstream_missing"
+				status, providerState = confirmedStatus, confirmedState
 			}
 		}
 		if err = s.repo.SetOrderStatus(lockCtx, o.ID, status, providerState); err != nil {
 			return mapStore(err)
 		}
-		_ = s.repo.Audit(lockCtx, &user.ID, "order."+action, "order", o.ID, ip, nil)
+		auditEvent, auditMeta := orderFinishAudit(action, "user", status, providerState)
+		_ = s.repo.Audit(lockCtx, &user.ID, auditEvent, "order", o.ID, ip, auditMeta)
 		o, err = s.repo.GetOrder(lockCtx, o.ID, scope)
 		if err != nil {
 			return err

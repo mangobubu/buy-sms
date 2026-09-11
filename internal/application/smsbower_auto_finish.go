@@ -100,23 +100,25 @@ func (s *Service) autoFinishSMSBowerLocked(ctx context.Context, order domain.Ord
 	}
 	s.invalidateProviderBalance(fresh.ProviderID)
 	providerState := "auto_" + action
-	if action == "complete" && canCompleteMissingSMSBowerActivation(fresh, err) {
-		// 历史短信接口仍可能成功，但完成接口已确认订单消失；复用手动
-		// 完成的严格证据检查，不把该情况当成可无限重试的供应商故障。
-		providerState = "upstream_missing"
-		err = nil
+	if action == "complete" {
+		if confirmedStatus, confirmedState, confirmed := confirmedSMSBowerCompletion(fresh, err); confirmed {
+			// 完成接口确认的真实终态与人工处理共用严格校验，不伪造完成。
+			status, providerState, err = confirmedStatus, confirmedState, nil
+		}
 	}
 	if err != nil {
 		// 保留消息指纹用于下一次轮询去重；失败次数负责退避，不把业务截止
 		// 时间写入 ExpiresAt，也不把未确认的远端动作当作本地成功。
 		s.pollFailure(ctx, fresh, state)
-		slog.Warn("SMSbower 倒计时结束处理失败，将重试", "order_id", fresh.ID, "action", action)
+		fields := append(orderActionFailureFields(fresh.ID, err), "action", action)
+		slog.Warn("SMSbower 倒计时结束处理失败，将重试", fields...)
 		return true, nil
 	}
 	if err = s.repo.SetOrderStatus(ctx, fresh.ID, status, providerState); err != nil {
 		s.pollFailure(ctx, fresh, state)
 		return true, err
 	}
-	_ = s.repo.Audit(ctx, nil, "order.auto_"+action, "order", fresh.ID, "", nil)
+	auditEvent, auditMeta := orderFinishAudit(action, "auto", status, providerState)
+	_ = s.repo.Audit(ctx, nil, auditEvent, "order", fresh.ID, "", auditMeta)
 	return true, nil
 }

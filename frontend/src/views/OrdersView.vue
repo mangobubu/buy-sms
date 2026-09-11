@@ -14,6 +14,7 @@ import type { NumberOrder, OrderQuery, PageResult, RenewalOption, RenewalOptions
 import { presentCancelPolicy, type CancelPresentation } from '@/utils/cancel-policy'
 import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, getPhoneNumberParts, providerName, smsBowerTierLabel } from '@/utils/format'
 import { isTerminalOrderStatus } from '@/utils/countdown'
+import { completionNotice } from '@/utils/order-completion'
 import { formatRenewalDuration, isRenewalCandidate, renewalOptionKey } from '@/utils/renewal-policy'
 import {
   createRenewalIdempotencyKey,
@@ -344,8 +345,9 @@ async function completeOrder(order: NumberOrder): Promise<void> {
   actionOrderId.value = order.id
   actionType.value = 'complete'
   try {
-    applyOrderMutation(await ordersApi.complete(order.id))
-    ElMessage.success('订单已完成结算')
+    const updatedOrder = await ordersApi.complete(order.id)
+    applyOrderMutation(updatedOrder)
+    ElMessage(completionNotice(updatedOrder.status))
     await load({ silent: true })
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '完成订单失败'))
