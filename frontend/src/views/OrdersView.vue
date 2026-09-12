@@ -9,12 +9,12 @@ import OrderCountdown from '@/components/OrderCountdown.vue'
 import OrderStatusTag from '@/components/OrderStatusTag.vue'
 import PhoneNumberCopy from '@/components/PhoneNumberCopy.vue'
 import { ordersApi } from '@/api/orders'
-import { errorMessage } from '@/api/http'
+import { errorCode, errorMessage } from '@/api/http'
 import type { NumberOrder, OrderQuery, PageResult, RenewalOption, RenewalOptions } from '@/types/api'
 import { presentCancelPolicy, type CancelPresentation } from '@/utils/cancel-policy'
 import { formatDateTime, formatMoney, formatPhoneNumber, formatPurchaseDuration, getPhoneNumberParts, providerName, smsBowerTierLabel } from '@/utils/format'
 import { isTerminalOrderStatus } from '@/utils/countdown'
-import { completionNotice } from '@/utils/order-completion'
+import { canOfferLocalCompletion, completionNotice } from '@/utils/order-completion'
 import { formatRenewalDuration, isRenewalCandidate, renewalOptionKey } from '@/utils/renewal-policy'
 import {
   createRenewalIdempotencyKey,
@@ -31,12 +31,23 @@ withDefaults(defineProps<{ embedded?: boolean }>(), {
 const loading = ref(false)
 const refreshing = ref(false)
 const actionOrderId = ref('')
-const actionType = ref<'complete' | 'cancel' | 'renew' | ''>('')
+const actionType = ref<'complete' | 'close-local' | 'cancel' | 'renew' | ''>('')
 const orders = ref<NumberOrder[]>([])
 const total = ref(0)
 const lastRefreshedAt = ref<Date | null>(null)
 const expandedOrders = ref<string[]>([])
 const countdownNow = useSecondNow()
+const localCompletionDialogVisible = ref(false)
+const localCompletionDialogOrder = ref<NumberOrder | null>(null)
+const localCompletionConfirmed = ref(false)
+const localCompletionFailureCode = ref('')
+const localCompletionCandidate = computed(() =>
+  orders.value.find((order) => order.id === localCompletionDialogOrder.value?.id),
+)
+const canConfirmLocalCompletion = computed(() => {
+  const order = localCompletionCandidate.value
+  return Boolean(order && canOfferLocalCompletion(order, localCompletionFailureCode.value, countdownNow.value))
+})
 const renewalOptionsByOrder = ref<Record<string, RenewalOptions>>({})
 const renewalCheckingIds = ref<string[]>([])
 const renewalNextCheckAt = new Map<string, number>()
@@ -347,10 +358,45 @@ async function completeOrder(order: NumberOrder): Promise<void> {
   try {
     const updatedOrder = await ordersApi.complete(order.id)
     applyOrderMutation(updatedOrder)
-    ElMessage(completionNotice(updatedOrder.status))
+    ElMessage(completionNotice(updatedOrder.status, updatedOrder.localCompleted))
     await load({ silent: true })
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '完成订单失败'))
+    await load({ silent: true })
+    const currentOrder = orders.value.find((item) => item.id === order.id)
+    const failureCode = errorCode(reason)
+    if (currentOrder && canOfferLocalCompletion(currentOrder, failureCode)) {
+      localCompletionDialogOrder.value = currentOrder
+      localCompletionFailureCode.value = failureCode
+      localCompletionConfirmed.value = false
+      localCompletionDialogVisible.value = true
+    }
+  } finally {
+    actionOrderId.value = ''
+    actionType.value = ''
+  }
+}
+
+function resetLocalCompletionDialog(): void {
+  localCompletionDialogOrder.value = null
+  localCompletionFailureCode.value = ''
+  localCompletionConfirmed.value = false
+}
+
+async function confirmLocalCompletion(): Promise<void> {
+  const order = localCompletionCandidate.value
+  if (!order || actionOrderId.value || !localCompletionConfirmed.value || !canConfirmLocalCompletion.value) return
+  actionOrderId.value = order.id
+  actionType.value = 'close-local'
+  try {
+    const updatedOrder = await ordersApi.closeLocal(order.id, { upstreamMissingConfirmed: true })
+    applyOrderMutation(updatedOrder)
+    ElMessage(completionNotice(updatedOrder.status, updatedOrder.localCompleted))
+    localCompletionDialogVisible.value = false
+    await load({ silent: true })
+  } catch (reason) {
+    ElMessage.error(errorMessage(reason, '本地结束失败，订单状态尚未确认，请刷新后重试'))
+    localCompletionConfirmed.value = false
     await load({ silent: true })
   } finally {
     actionOrderId.value = ''
@@ -505,6 +551,7 @@ onBeforeUnmount(() => {
                   <small v-if="isLive(scope.row)">
                     {{ scope.row.webhookEnabled ? 'Webhook 实时推送已启用' : '正在通过安全轮询获取新短信' }}，收到第一条后仍会继续监听
                   </small>
+                  <small v-else-if="scope.row.localCompleted">本站已停止接码，短信和金额已保留；不代表上游已完成或退款</small>
                   <small v-else>该订单不会再接收新的验证码</small>
                 </p>
               </div>
@@ -560,7 +607,7 @@ onBeforeUnmount(() => {
           <template #default="scope"><strong class="money-cell">{{ formatMoney(scope.row.price, scope.row.currency) }}</strong></template>
         </el-table-column>
         <el-table-column label="状态" min-width="105">
-          <template #default="scope"><OrderStatusTag :status="scope.row.status" /></template>
+          <template #default="scope"><OrderStatusTag :status="scope.row.status" :local-completed="scope.row.localCompleted" /></template>
         </el-table-column>
         <el-table-column label="号码时效" min-width="145">
           <template #default="scope">
@@ -626,7 +673,7 @@ onBeforeUnmount(() => {
             <small v-if="order.provider === 'smsbower' && smsBowerTierLabel(order.tier)">等级：{{ smsBowerTierLabel(order.tier) }}</small>
             <small v-if="order.provider === 'herosms'">时长：{{ formatPurchaseDuration(order.duration) }}</small>
           </div>
-          <OrderStatusTag :status="order.status" />
+          <OrderStatusTag :status="order.status" :local-completed="order.localCompleted" />
         </header>
         <div class="mobile-order-countdown">
           <span>号码有效期</span>
@@ -680,7 +727,7 @@ onBeforeUnmount(() => {
         <div v-if="expandedOrders.includes(order.id)" class="mobile-sms-list">
           <div class="receive-state" :class="{ finished: !isLive(order) }">
             <span><el-icon><Connection /></el-icon></span>
-            <p><strong>{{ isLive(order) ? '持续接收中' : '收码已结束' }}</strong><small>{{ isLive(order) ? '收到验证码后仍会继续监听' : '不会再接收新短信' }}</small></p>
+            <p><strong>{{ isLive(order) ? '持续接收中' : '收码已结束' }}</strong><small>{{ isLive(order) ? '收到验证码后仍会继续监听' : order.localCompleted ? '本站已停止接码，短信和金额已保留；不代表上游已完成或退款' : '不会再接收新短信' }}</small></p>
           </div>
           <article v-for="message in order.messages" :key="message.id" class="mobile-sms-item">
             <div><strong>{{ message.code || '未识别验证码' }}</strong><time>{{ formatDateTime(message.receivedAt) }}</time></div>
@@ -704,6 +751,60 @@ onBeforeUnmount(() => {
       :total="total"
       @current-change="load()"
     />
+
+    <el-dialog
+      v-model="localCompletionDialogVisible"
+      title="仅在本地结束订单"
+      width="min(560px, calc(100vw - 32px))"
+      destroy-on-close
+      :show-close="!actionOrderId"
+      :close-on-click-modal="!actionOrderId"
+      :close-on-press-escape="!actionOrderId"
+      @closed="resetLocalCompletionDialog"
+    >
+      <div v-if="localCompletionDialogOrder" class="local-completion-dialog-content">
+        <p>普通完成未获 SMSBower 确认。如你已在供应商处核对该号码不存在，可仅结束本站记录。</p>
+        <div class="renewal-target">
+          <span class="phone-icon"><Cellphone /></span>
+          <div>
+            <strong>{{ formatPhoneNumber(localCompletionDialogOrder.phoneNumber) }}</strong>
+            <small>SMSBower · {{ localCompletionDialogOrder.serviceName || localCompletionDialogOrder.serviceCode }}</small>
+          </div>
+        </div>
+        <el-alert
+          title="系统会先重试完成并核对上游状态"
+          description="若 SMSBower 仍无法确认，才仅结束本站记录并停止接码；短信记录和金额保持不变，不代表上游已成功完成或退款。"
+          type="warning"
+          :closable="false"
+          show-icon
+        />
+        <el-checkbox
+          v-model="localCompletionConfirmed"
+          class="local-completion-confirmation"
+          :disabled="Boolean(actionOrderId)"
+        >
+          我已核对 SMSBower，该号码已不存在；我理解若上游仍无法确认，系统才仅结束本站记录并停止接码，不代表上游完成或退款。
+        </el-checkbox>
+        <el-alert
+          v-if="!canConfirmLocalCompletion"
+          title="订单状态已变化，当前不能在本地结束。请关闭后刷新核对。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+      </div>
+      <template #footer>
+        <el-button :disabled="Boolean(actionOrderId)" @click="localCompletionDialogVisible = false">暂不处理</el-button>
+        <el-button
+          type="warning"
+          :loading="actionType === 'close-local'"
+          :disabled="Boolean(actionOrderId) || !localCompletionConfirmed || !canConfirmLocalCompletion"
+          @click="confirmLocalCompletion"
+        >
+          确认仅在本地结束
+        </el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="renewalDialogVisible"

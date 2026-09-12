@@ -21,36 +21,53 @@ func (c *SMSBower) Poll(ctx context.Context, apiKey, upstreamID string) (PollRes
 }
 
 func (c *SMSBower) Complete(ctx context.Context, apiKey, upstreamID string) error {
+	_, err := c.completeWithConfirmation(ctx, apiKey, upstreamID, false)
+	return err
+}
+
+// CompleteWithConfirmation performs setStatus(6) and, for an unconfirmed
+// BAD_STATUS/NO_ACTIVATION response, returns the read-only getStatus result.
+// The result is kept out of ProviderError so callers can persist any code
+// before deciding whether a local recovery is allowed.
+func (c *SMSBower) CompleteWithConfirmation(ctx context.Context, apiKey, upstreamID string) (PollResult, error) {
+	return c.completeWithConfirmation(ctx, apiKey, upstreamID, true)
+}
+
+func (c *SMSBower) completeWithConfirmation(ctx context.Context, apiKey, upstreamID string, preserveMessages bool) (PollResult, error) {
 	err := c.smsActivateClient.Complete(ctx, apiKey, upstreamID)
 	if !smsBowerNoActivation(err) && !smsBowerBadStatus(err) {
-		return err
+		return PollResult{}, err
 	}
 	// BAD_STATUS 也可能来自已结束的订单。只读核对实际状态，不重复提交
 	// setStatus，也不把状态拒绝、超时或仍在接码当作远端完成成功。
-	result, confirmErr := c.activationStatus(ctx, apiKey, upstreamID, "complete.confirm")
+	result, confirmErr := c.activationStatusWithMessages(ctx, apiKey, upstreamID, "complete.confirm", preserveMessages)
 	if confirmErr != nil {
-		return confirmErr
+		return PollResult{}, confirmErr
 	}
 	switch result.State {
 	case PollMissing:
 		// 由应用层结合本地短信决定是否可完成；这里不声称远端完成成功。
-		return &ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete",
+		return result, &ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete",
 			Code: CodeActivationMissing, ConfirmationState: PollMissing}
 	case PollCompleted, PollCanceled, PollExpired, PollRefunded:
-		return &ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete",
+		return result, &ProviderError{Provider: domain.ProviderSMSBower, Operation: "complete",
 			Code: CodeActivationTerminal, ConfirmationState: result.State}
 	default:
 		var upstream *ProviderError
 		if errors.As(err, &upstream) && upstream != nil {
 			confirmed := *upstream
 			confirmed.ConfirmationState = result.State
-			return &confirmed
+			return result, &confirmed
 		}
 	}
-	return err
+	return result, err
 }
 
 func (c *SMSBower) activationStatus(ctx context.Context, apiKey, upstreamID, operation string) (PollResult, error) {
+	return c.activationStatusWithMessages(ctx, apiKey, upstreamID, operation, false)
+}
+
+func (c *SMSBower) activationStatusWithMessages(ctx context.Context, apiKey, upstreamID, operation string, preserveMessages bool) (PollResult, error) {
 	query := url.Values{"action": {"getStatus"}, "id": {upstreamID}}
 	payload, err := c.http.get(ctx, operation, apiKey, "", query, false)
 	if err == nil {
@@ -74,7 +91,7 @@ func (c *SMSBower) activationStatus(ctx context.Context, apiKey, upstreamID, ope
 		// 的结束/退款；只接受标准取消文本或明确的文字终态。
 		return PollResult{}, c.http.failure(operation, "INVALID_RESPONSE", 0, false, nil)
 	}
-	if operation == "complete.confirm" && isTerminalPollState(result.State) && len(result.Messages) > 0 {
+	if !preserveMessages && operation == "complete.confirm" && isTerminalPollState(result.State) && len(result.Messages) > 0 {
 		// Complete 的错误契约只传递状态，不能携带短信。确认响应还含短信
 		// 时不提前关闭订单，留给正常轮询保存，避免遗漏最后一条验证码。
 		return PollResult{}, c.http.failure(operation, "INVALID_RESPONSE", 0, false, nil)

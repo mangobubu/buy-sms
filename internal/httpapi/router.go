@@ -68,6 +68,7 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.GET("/orders", h.orders)
 	authed.GET("/orders/:id", h.order)
 	authed.POST("/orders/:id/complete", h.completeOrder)
+	authed.POST("/orders/:id/close-local", h.localCompleteOrder)
 	authed.POST("/orders/:id/cancel", h.cancelOrder)
 	authed.GET("/orders/:id/renewal-options", h.renewalOptions)
 	authed.POST("/orders/:id/renew", h.renewOrder)
@@ -364,7 +365,19 @@ func (h *Handler) renewOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, value)
 }
 func (h *Handler) completeOrder(c *gin.Context) { h.finish(c, "complete") }
-func (h *Handler) cancelOrder(c *gin.Context)   { h.finish(c, "cancel") }
+func (h *Handler) localCompleteOrder(c *gin.Context) {
+	var in application.LocalCompleteInput
+	if !bind(c, &in) {
+		return
+	}
+	value, err := h.app.LocalCompleteOrder(c.Request.Context(), c.Param("id"), in, currentUser(c), c.ClientIP())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
+func (h *Handler) cancelOrder(c *gin.Context) { h.finish(c, "cancel") }
 func (h *Handler) finish(c *gin.Context, action string) {
 	value, err := h.app.FinishOrder(c.Request.Context(), c.Param("id"), action, currentUser(c), c.ClientIP())
 	if err != nil {
@@ -466,6 +479,7 @@ func respondError(c *gin.Context, err error) {
 		switch actionErr.Code {
 		case application.OrderActionCodeCancelNotAvailableYet, application.OrderActionCodeCancelNotAllowed,
 			application.OrderActionCodeCompleteStatusConflict,
+			application.OrderActionCodeLocalCompleteNotAllowed,
 			application.OrderActionCodeRenewalNotAvailable, application.OrderActionCodeRenewalPriceChanged,
 			application.OrderActionCodeRenewalInProgress,
 			application.OrderActionCodeRenewalIdempotencyMismatch:

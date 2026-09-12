@@ -60,6 +60,7 @@ npm run build
 | GET | `/orders/:id/renewal-options` | 查询供应商当前允许的续期或重新启用选项及报价 |
 | POST | `/orders/:id/renew` | 按所选选项续期或重新启用号码；必须携带 16–128 字符的 `Idempotency-Key` 请求头 |
 | POST | `/orders/:id/complete` | 完成并结算 |
+| POST | `/orders/:id/close-local` | SMSBower 状态冲突的人工本地结束；必须显式提交 `upstreamMissingConfirmed: true` |
 | POST | `/orders/:id/cancel` | 取消号码 |
 
 取消能力以订单接口返回的 `canCancel`、`cancelAvailableAt`、`cancelWaitSeconds` 和 `cancelUnavailableReason` 为准。HeroSMS 标准号码购买满 2 分钟后可取消；HeroSMS 长期号码还须处于购买后 20 分钟内。SMSBower 根据当前实际接口行为允许购买后立即尝试取消，SMSPool 的短暂锁定时长由供应商动态裁决；两者若被上游暂时拒绝，接口会返回可重试提示。任何平台在已收到短信、订单终结或号码过期后均关闭取消入口。
@@ -68,6 +69,7 @@ npm run build
 | PUT | `/users/:id` | 更新用户 |
 
 供应商规范代码为 `herosms`、`smsbower`、`smspool`。完整 DTO 位于 `src/types/api.ts`。
+SMSBower 普通完成返回 `complete_status_conflict` 后，已满 25 分钟且本次激活收到过短信的订单可展示“本地结束”确认框。用户必须勾选已在供应商后台确认号码不存在；服务端仍会在订单锁内重新校验资格和供应商状态。只有 `BAD_STATUS` 且确认状态为 `received` 的业务拒绝可本地结束，等待短信、鉴权失败或超时等不允许绕过。订单返回的 `localCompleted` 标识用于区分人工本地结束与供应商确认终态；本地结束保留短信、金额和审计，不代表远端完成或退款。
 购买页统一先选服务再选国家。HeroSMS 的购买时长、价格和库存由接口按当前服务与国家动态返回，不在前端维护固定时长列表；标准短时激活仍展示当前账号有权限且有库存的多价格档位，长租则使用所选时长绑定的唯一价格与库存。未选择长租时，购买请求省略 `duration`，保持供应商默认短时激活语义。SMSBower 会合并 `bronze`、`silver`、`gold` 三个等级的可用资源，并在价格选项中展示等级；选择价格时会同时确定下单等级，无需单独选择。切换供应商时，页面会分别保留各供应商当前的服务、国家、HeroSMS 时长和价格选择；切换到其他管理页面再返回时，会恢复供应商、服务、国家和 HeroSMS 时长，并重新加载实时库存与报价，标准短时价格需要重新选择。供应商卡片会定时刷新实时余额；停用或未配置的供应商仍会显示，但不允许用于采购，余额显示为不可查询状态。
 
 ## 号码续期与重新启用

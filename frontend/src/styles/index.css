@@ -1629,9 +1629,30 @@ code {
   white-space: nowrap;
 }
 
-.renewal-dialog-content {
+.renewal-dialog-content,
+.local-completion-dialog-content {
   display: grid;
   gap: 18px;
+}
+
+.local-completion-dialog-content > p {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.local-completion-confirmation {
+  align-items: flex-start;
+  height: auto;
+  white-space: normal;
+}
+
+.local-completion-confirmation .el-checkbox__input {
+  margin-top: 5px;
+}
+
+.local-completion-confirmation .el-checkbox__label {
+  line-height: 1.7;
+  white-space: normal;
 }
 
 .renewal-target {

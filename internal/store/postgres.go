@@ -671,6 +671,30 @@ func (s *Postgres) SetOrderStatus(ctx context.Context, id, status, state string)
 	}
 	return err
 }
+
+// The status transition and the operator's confirmation audit must commit
+// together. A failed audit insert rolls back the entire statement, and a
+// duplicate/terminal request produces neither another transition nor an audit.
+const completeOrderLocallySQL = `
+WITH closed AS (
+    UPDATE orders SET status='completed',last_provider_state='user_local_complete',
+        request_next_pending=false,request_next_inflight=false,
+        request_next_inflight_at=NULL,request_next_failures=0,poll_failures=0,updated_at=now()
+    WHERE id=$1 AND provider_id='smsbower' AND status='active'
+        AND renewal_inflight=false AND request_next_inflight=false
+    RETURNING id
+)
+INSERT INTO audit_logs(user_id,action,target_type,target_id,ip,metadata)
+SELECT $2,'order.local_complete','order',id::text,NULLIF($3,'')::inet,$4 FROM closed`
+
+func (s *Postgres) CompleteOrderLocally(ctx context.Context, id, actorID, ip string, meta json.RawMessage) error {
+	ct, err := s.pool.Exec(ctx, completeOrderLocallySQL, id, actorID, ip, meta)
+	if err == nil && ct.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return err
+}
+
 func (s *Postgres) ClaimDueOrders(ctx context.Context, limit int, now time.Time, lease time.Duration) ([]domain.Order, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

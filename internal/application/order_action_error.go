@@ -15,6 +15,7 @@ const (
 	OrderActionCodeCancelNotAvailableYet      = "cancel_not_available_yet"
 	OrderActionCodeCancelNotAllowed           = "cancel_not_allowed"
 	OrderActionCodeCompleteStatusConflict     = "complete_status_conflict"
+	OrderActionCodeLocalCompleteNotAllowed    = "local_complete_not_allowed"
 	OrderActionCodeRenewalIdempotencyMismatch = "renewal_idempotency_mismatch"
 	OrderActionCodeRenewalNotAvailable        = "renewal_not_available"
 	OrderActionCodeRenewalPriceChanged        = "renewal_price_changed"
@@ -32,6 +33,13 @@ type OrderActionError struct {
 	Message string
 	Kind    error
 	Cause   error
+}
+
+func localCompleteNotAllowedError() *OrderActionError {
+	return &OrderActionError{
+		Action: "local_complete", Code: OrderActionCodeLocalCompleteNotAllowed, Kind: ErrConflict,
+		Message: "只有已超过25分钟且本次收到短信的 SMSBower 活动号码可在核对后本地结束；请等待正在处理的订单操作完成",
+	}
 }
 
 func (e *OrderActionError) Error() string { return e.Message }

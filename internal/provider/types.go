@@ -62,6 +62,12 @@ type Client interface {
 	RequestAnother(context.Context, string, string) (RequestAnotherResult, error)
 }
 
+// CompletionConfirmationClient attempts completion and also exposes its
+// follow-up status confirmation so the caller can persist any final messages.
+type CompletionConfirmationClient interface {
+	CompleteWithConfirmation(context.Context, string, string) (PollResult, error)
+}
+
 const (
 	RenewalProlong    = "prolong"
 	RenewalReactivate = "reactivate"

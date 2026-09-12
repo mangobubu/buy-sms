@@ -169,7 +169,7 @@ onBeforeUnmount(() => {
               <time>{{ formatDateTime(order.updatedAt || order.createdAt) }}</time>
             </span>
             <span class="message-count">{{ order.messages?.length || 0 }} 条短信</span>
-            <OrderStatusTag :status="order.status" />
+            <OrderStatusTag :status="order.status" :local-completed="order.localCompleted" />
             <el-icon class="recent-arrow"><ArrowRight /></el-icon>
           </button>
         </div>

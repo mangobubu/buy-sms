@@ -20,6 +20,8 @@ export const ordersApi = {
     http.get<PageResult<NumberOrder> | NumberOrder[]>('/orders', { params: query }).then(unwrap),
   detail: (id: string) => http.get<NumberOrder>(`/orders/${id}`).then(unwrap),
   complete: (id: string) => http.post<NumberOrder>(`/orders/${id}/complete`).then(unwrap),
+  closeLocal: (id: string, payload: { upstreamMissingConfirmed: true }) =>
+    http.post<NumberOrder>(`/orders/${id}/close-local`, payload).then(unwrap),
   cancel: (id: string) => http.post<NumberOrder>(`/orders/${id}/cancel`).then(unwrap),
   renewalOptions: (id: string) =>
     http.get<RenewalOptions>(`/orders/${id}/renewal-options`).then(unwrap),

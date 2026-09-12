@@ -222,6 +222,7 @@ export interface NumberOrder {
   duration?: string
   phoneNumber: string
   status: OrderStatus | string
+  localCompleted?: boolean
   price: string
   currency: string
   messages: SmsMessage[]

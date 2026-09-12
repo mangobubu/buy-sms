@@ -53,6 +53,7 @@ type Repository interface {
 	SearchOrders(context.Context, string, string, string, string, int, int) ([]domain.Order, int, error)
 	WithOrderLock(context.Context, string, func(context.Context) error) error
 	SetOrderStatus(context.Context, string, string, string) error
+	CompleteOrderLocally(context.Context, string, string, string, json.RawMessage) error
 	ClaimDueOrders(context.Context, int, time.Time, time.Duration) ([]domain.Order, error)
 	RescheduleClaimedOrderPoll(context.Context, string, string, time.Time, time.Time) error
 	UpdatePoll(context.Context, string, string, time.Time, int) error

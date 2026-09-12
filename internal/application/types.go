@@ -63,6 +63,7 @@ type OrderDTO struct {
 	QualityTier                  string     `json:"tier,omitempty"`
 	Duration                     string     `json:"duration,omitempty"`
 	Status                       string     `json:"status"`
+	LocalCompleted               bool       `json:"localCompleted,omitempty"`
 	Price                        string     `json:"price"`
 	Currency                     string     `json:"currency"`
 	Messages                     []SMSDTO   `json:"messages"`
@@ -227,8 +228,16 @@ func OrderView(o domain.Order, webhook bool, now time.Time) OrderDTO {
 	if cancel.WaitSeconds > 0 {
 		waitSeconds = &cancel.WaitSeconds
 	}
-	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Duration: o.Duration, Status: status, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, CurrentActivationHasMessages: hasCurrentActivationMessage(o), RenewalPending: o.RenewalInflight, WebhookEnabled: webhook, ExpiresAt: o.ExpiresAt, CanCancel: cancel.Allowed, CancelAvailableAt: cancel.AvailableAt, CancelWaitSeconds: waitSeconds, CancelUnavailableReason: cancel.UnavailableReason, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Duration: o.Duration, Status: status, LocalCompleted: o.Status == domain.OrderCompleted && o.LastProviderState == "user_local_complete", Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, CurrentActivationHasMessages: hasCurrentActivationMessage(o), RenewalPending: o.RenewalInflight, WebhookEnabled: webhook, ExpiresAt: o.ExpiresAt, CanCancel: cancel.Allowed, CancelAvailableAt: cancel.AvailableAt, CancelWaitSeconds: waitSeconds, CancelUnavailableReason: cancel.UnavailableReason, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
+
+// LocalCompleteInput is an explicit operator acknowledgement used only for
+// recovering an SMSBower activation that disappeared after receiving a code.
+type LocalCompleteInput struct {
+	UpstreamMissingConfirmed bool   `json:"upstreamMissingConfirmed"`
+	Reason                   string `json:"reason,omitempty"`
+}
+
 func UserView(u domain.User) UserDTO {
 	return UserDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Active, LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt}
 }

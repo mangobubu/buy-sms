@@ -10,6 +10,7 @@ interface StatusMeta {
 
 interface Props {
   status?: string | null
+  localCompleted?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -30,6 +31,10 @@ const statusMap: Readonly<Record<string, StatusMeta>> = {
 const statusMeta = computed<StatusMeta>(() => {
   const normalizedStatus = props.status?.trim().toLowerCase() ?? ''
 
+  if (normalizedStatus === 'completed' && props.localCompleted) {
+    return { label: '本地已结束', type: 'info' }
+  }
+
   return statusMap[normalizedStatus] ?? {
     label: props.status?.trim() || '未知状态',
     type: 'info',
@@ -38,7 +43,12 @@ const statusMeta = computed<StatusMeta>(() => {
 </script>
 
 <template>
-  <el-tag :type="statusMeta.type" effect="light" round>
+  <el-tag
+    :type="statusMeta.type"
+    :title="localCompleted ? '仅结束本站记录，不代表上游已完成或退款' : undefined"
+    effect="light"
+    round
+  >
     {{ statusMeta.label }}
   </el-tag>
 </template>
