@@ -663,7 +663,7 @@ onBeforeUnmount(() => {
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="scope">
             <div class="order-actions">
-              <div v-if="isLive(scope.row) || canRenew(scope.row)" class="order-action-buttons">
+              <div v-if="isLive(scope.row) || canRenew(scope.row) || isCompletedOrder(scope.row)" class="order-action-buttons">
                 <el-button
                   v-if="isLive(scope.row) && !scope.row.renewalPending"
                   link
@@ -695,20 +695,20 @@ onBeforeUnmount(() => {
                 >
                   {{ cancelPresentation(scope.row).buttonText }}
                 </el-button>
+                <el-switch
+                  v-if="isCompletedOrder(scope.row)"
+                  class="order-usage-switch"
+                  :model-value="isOrderUsed(scope.row)"
+                  inline-prompt
+                  active-text="已用"
+                  inactive-text="未用"
+                  :loading="actionType === 'mark-used' && actionOrderId === scope.row.id"
+                  :disabled="Boolean(actionOrderId)"
+                  title="仅作为本站个人标记，不影响接码平台"
+                  :aria-label="isOrderUsed(scope.row) ? '标记为未用' : '标记为已用'"
+                  @change="setOrderUsed(scope.row, Boolean($event))"
+                />
               </div>
-              <el-switch
-                v-if="isCompletedOrder(scope.row)"
-                class="order-usage-switch"
-                :model-value="isOrderUsed(scope.row)"
-                inline-prompt
-                active-text="已用"
-                inactive-text="未用"
-                :loading="actionType === 'mark-used' && actionOrderId === scope.row.id"
-                :disabled="Boolean(actionOrderId)"
-                title="仅作为本站个人标记，不影响接码平台"
-                :aria-label="isOrderUsed(scope.row) ? '标记为未用' : '标记为已用'"
-                @change="setOrderUsed(scope.row, Boolean($event))"
-              />
               <small v-if="cancelPresentation(scope.row).hint" class="cancel-hint">
                 {{ cancelPresentation(scope.row).hint }}
               </small>

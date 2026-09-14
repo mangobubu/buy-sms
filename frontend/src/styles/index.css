@@ -1615,6 +1615,9 @@ code {
 }
 
 .order-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   white-space: nowrap;
 }
 
