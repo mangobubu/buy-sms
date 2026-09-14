@@ -10,6 +10,8 @@ const (
 	ProviderSMSBower = "smsbower"
 	ProviderSMSPool  = "smspool"
 
+	ProviderSMSPin = "smspin"
+
 	OrderActive    = "active"
 	OrderCompleted = "completed"
 	OrderCanceled  = "canceled"
@@ -140,6 +142,8 @@ func NormalizeProvider(v string) string {
 		return ProviderHeroSMS
 	case "sms-pool", "sms_pool", ProviderSMSPool:
 		return ProviderSMSPool
+	case "sms-pin", "sms_pin", "smspin.io", ProviderSMSPin:
+		return ProviderSMSPin
 	default:
 		return v
 	}

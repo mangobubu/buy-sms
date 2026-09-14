@@ -33,6 +33,7 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      SMSPIN_BASE_URL: ${SMSPIN_BASE_URL:-https://smspin.io/api/v1}
     ports:
       - "${APP_BIND_ADDR:-127.0.0.1}:${APP_PORT:-18080}:8080"
     healthcheck:

@@ -1,4 +1,4 @@
-export type ProviderCode = 'herosms' | 'smsbower' | 'smspool'
+export type ProviderCode = 'herosms' | 'smsbower' | 'smspool' | 'smspin'
 export type SmsBowerTier = 'bronze' | 'silver' | 'gold'
 
 export interface ApiEnvelope<T> {

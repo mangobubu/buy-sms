@@ -259,6 +259,8 @@ func providerName(id string) string {
 		return "SMSBower"
 	case domain.ProviderSMSPool:
 		return "SMSPool"
+	case domain.ProviderSMSPin:
+		return "SMSPin"
 	default:
 		return id
 	}

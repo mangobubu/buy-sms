@@ -15,6 +15,10 @@ interface ProviderDraft extends UpdateProviderPayload {
   webhookToken: string
 }
 
+const DEFAULT_PROVIDER_API_BASE_URLS: Partial<Record<ProviderConfig['code'], string>> = {
+  smspin: 'https://smspin.io/api/v1',
+}
+
 const loading = ref(false)
 const savingId = ref('')
 const providers = ref<ProviderConfig[]>([])
@@ -30,7 +34,7 @@ const providerRows = computed(() =>
 
 function makeDraft(provider: ProviderConfig): ProviderDraft {
   return {
-    apiBaseUrl: provider.apiBaseUrl || '',
+    apiBaseUrl: provider.apiBaseUrl || DEFAULT_PROVIDER_API_BASE_URLS[provider.code] || '',
     apiKey: '',
     webhookToken: '',
     enabled: provider.enabled,
@@ -97,7 +101,7 @@ onMounted(load)
   <div class="page-stack providers-page">
     <PageHeader title="供应商配置" description="配置第三方接口凭据。密钥只写入服务端，保存后不会再回显。">
       <template #actions>
-        <span class="provider-count"><i /> {{ enabledCount }}/{{ providers.length || 3 }} 已启用</span>
+        <span class="provider-count"><i /> {{ enabledCount }}/{{ providers.length || 4 }} 已启用</span>
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </template>
     </PageHeader>

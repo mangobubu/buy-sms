@@ -27,6 +27,7 @@ type Config struct {
 	HeroSMSBaseURL    string
 	SMSBowerBaseURL   string
 	SMSPoolBaseURL    string
+	SMSPinBaseURL     string
 	SessionTTL        time.Duration
 	CaptchaTTL        time.Duration
 	PollInterval      time.Duration
@@ -44,6 +45,7 @@ func Load() (Config, error) {
 		HeroSMSBaseURL:    env("HERO_SMS_BASE_URL", "https://hero-sms.com/api/v1"),
 		SMSBowerBaseURL:   env("SMSBOWER_BASE_URL", "https://smsbower.page/stubs/handler_api.php"),
 		SMSPoolBaseURL:    env("SMSPOOL_BASE_URL", "https://api.smspool.net"),
+		SMSPinBaseURL:     env("SMSPIN_BASE_URL", "https://smspin.io/api/v1"),
 		SessionTTL:        12 * time.Hour,
 		CaptchaTTL:        5 * time.Minute,
 		PollInterval:      10 * time.Second,

@@ -884,6 +884,7 @@ code {
 .provider-herosms { background: linear-gradient(145deg, #426fee, #3151bb); }
 .provider-smsbower { background: linear-gradient(145deg, #805ee8, #5d3dbd); }
 .provider-smspool { background: linear-gradient(145deg, #10ad80, #087b5d); }
+.provider-smspin { background: linear-gradient(145deg, #e86a3a, #b63b24); }
 
 .recent-order-main,
 .stacked-cell,

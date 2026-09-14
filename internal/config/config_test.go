@@ -23,3 +23,24 @@ func TestAdminPathMustBeSingleSegment(t *testing.T) {
 		t.Fatal("多段后台入口应报错")
 	}
 }
+func TestSMSPinBaseURLDefaultAndEnvironmentOverride(t *testing.T) {
+	t.Setenv("APP_ENV", "development")
+	t.Setenv("DATABASE_URL", "postgres://example.invalid/db")
+	t.Setenv("SMSPIN_BASE_URL", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if cfg.SMSPinBaseURL != "https://smspin.io/api/v1" {
+		t.Fatalf("default=%q", cfg.SMSPinBaseURL)
+	}
+	want := "http://127.0.0.1:19092/api/v1"
+	t.Setenv("SMSPIN_BASE_URL", want)
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load override: %v", err)
+	}
+	if cfg.SMSPinBaseURL != want {
+		t.Fatalf("override=%q", cfg.SMSPinBaseURL)
+	}
+}

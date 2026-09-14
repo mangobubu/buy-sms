@@ -576,6 +576,7 @@ onBeforeUnmount(() => {
         <el-option label="HeroSMS" value="herosms" />
         <el-option label="SMSBower" value="smsbower" />
         <el-option label="SMSPool" value="smspool" />
+        <el-option label="SMSPin" value="smspin" />
       </el-select>
       <el-button type="primary" :icon="Search" @click="search">查询</el-button>
       <el-button @click="resetFilters">重置</el-button>
@@ -927,4 +928,3 @@ onBeforeUnmount(() => {
     </el-dialog>
   </div>
 </template>
-

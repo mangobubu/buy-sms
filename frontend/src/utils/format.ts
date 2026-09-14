@@ -4,6 +4,7 @@ export const providerNames: Record<ProviderCode, string> = {
   herosms: 'HeroSMS',
   smsbower: 'SMSBower',
   smspool: 'SMSPool',
+  smspin: 'SMSPin',
 }
 
 export function providerName(code?: string): string {
@@ -106,4 +107,3 @@ export function formatPhoneNumber(phone?: string): string {
 export function maskPhone(phone?: string): string {
   return phone || '号码分配中'
 }
-

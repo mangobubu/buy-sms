@@ -176,7 +176,7 @@ interface PersistedProviderSelection {
   duration: string
 }
 
-const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool']
+const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool', 'smspin']
 const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
 let persistedProviderPreference: ProviderCode | '' = ''
 const DEFAULT_DURATION_SELECTION = 'duration:default'

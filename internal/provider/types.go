@@ -247,6 +247,8 @@ func New(providerID, baseURL string, options ...Option) (Client, error) {
 		return NewSMSBower(baseURL, options...), nil
 	case domain.ProviderSMSPool:
 		return NewSMSPool(baseURL, options...), nil
+	case domain.ProviderSMSPin:
+		return NewSMSPin(baseURL, options...), nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, providerID)
 	}

@@ -91,9 +91,9 @@ onMounted(() => {
       <div class="intro-content">
         <div class="eyebrow"><span /> 多平台统一接入</div>
         <h1>每一条验证码，<br />都在掌控之中。</h1>
-        <p>聚合 HeroSMS、SMSBower 与 SMSPool，在一个安全、清晰的工作台完成号码采购与持续收码。</p>
+        <p>聚合 HeroSMS、SMSBower、SMSPool 与 SMSPin，在一个安全、清晰的工作台完成号码采购与持续收码。</p>
         <div class="intro-features">
-          <div><strong>3</strong><span>供应商聚合</span></div>
+          <div><strong>4</strong><span>供应商聚合</span></div>
           <div><strong>24/7</strong><span>持续接收</span></div>
           <div><strong>Webhook</strong><span>实时优先</span></div>
         </div>

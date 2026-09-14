@@ -1,10 +1,10 @@
 # 短信号码购买聚合平台
 
-这是一个聚合 Hero-SMS、SMSBower 与 SMSPool 的短信号码购买平台。后端使用 Go、Gin 与 PostgreSQL，管理端使用 Vue 3 与 Element Plus。生产镜像会把前端静态资源嵌入 Go 可执行文件，因此只运行一个应用进程；PostgreSQL 作为独立持久化服务运行。
+这是一个聚合 Hero-SMS、SMSBower、SMSPool 与 smspin.io 的短信号码购买平台。后端使用 Go、Gin 与 PostgreSQL，管理端使用 Vue 3 与 Element Plus。生产镜像会把前端静态资源嵌入 Go 可执行文件，因此只运行一个应用进程；PostgreSQL 作为独立持久化服务运行。
 
 ## 核心能力
 
-- 聚合三个供应商的服务、国家、价格、库存、下单、取消与结算能力；HeroSMS 支持从接口动态读取短时与长租时长，并按当前账号可购报价档位精确购买；SMSBower 支持 Gold、Silver、Bronze 号码等级。
+- 聚合四个供应商的服务、国家、价格、库存、下单、取消与结算能力；HeroSMS 支持从接口动态读取短时与长租时长，并按当前账号可购报价档位精确购买；SMSBower 支持 Gold、Silver、Bronze 号码等级。
 - 供应商支持 Webhook 时优先接收推送，不支持时降级为服务端轮询。
 - 号码在结算或取消前持续接收多条验证码，号码、短信和状态变更都持久化到 PostgreSQL；供应商返回截止时间时，界面同步显示实时倒计时。
 - 支持按供应商实时资格续期或重新启用号码：HeroSMS 使用 prolong/options 与 history 返回的实际价格，SMSPool 使用 history 报价并以 active 返回的实际价格结算。
@@ -76,7 +76,7 @@ Windows PowerShell 可使用 `Copy-Item .env.example .env` 创建配置；没有
 
 `.env` 已加入忽略名单。不要把真实密钥、数据库备份或生产日志提交到仓库。反向代理部署时，仅把代理地址加入 `TRUSTED_PROXIES`，并在代理层启用 HTTPS、请求体限制与访问日志脱敏。
 
-首次登录后，请在“供应商配置”页录入 Hero-SMS、SMSBower 与 SMSPool 的 API 地址和密钥。供应商凭证只以加密形式写入 PostgreSQL，不通过浏览器存储或容器环境变量维护；修改 `DATA_ENCRYPTION_KEY` 前必须按应用的数据密钥轮换流程重新加密已有凭证。
+首次登录后，请在“供应商配置”页录入 Hero-SMS、SMSBower、SMSPool 与 SMSPin 的 API 地址和密钥。供应商凭证只以加密形式写入 PostgreSQL，不通过浏览器存储或容器环境变量维护；修改 `DATA_ENCRYPTION_KEY` 前必须按应用的数据密钥轮换流程重新加密已有凭证。
 
 购买接口要求 `Idempotency-Key` 请求头。管理端会为一次购买尝试生成并复用该键；当上游响应超时、结果未知时，同键重试不会再次购买，避免重复扣费。
 续期与重新启用接口同样要求 `Idempotency-Key` 请求头。是否可操作不必等待号码到期，以供应商 options/history 返回的实时资格为准；上游提交结果未知时，后台只读对账实际结果并冻结重复提交，避免重复扣费。
@@ -133,3 +133,5 @@ docker compose down
 - 应用容器以 UID 10001 的非 root 用户运行，根文件系统只读，并移除 Linux capabilities。
 - PostgreSQL 使用具名卷持久化，不依赖客户端缓存保存订单、号码、验证码或轮询状态。
 - 结束本地验证后应停止开发服务；Compose 验证结束可执行 `docker compose down`，数据库卷默认保留。
+
+SMSPin 使用 https://smspin.io/api/v1，通过 X-API-Key 认证；目录读取 /countries、/services、/numbers，下单使用 POST /orders，订单状态使用 GET /orders/{id} 轮询。SMSPin 不提供完成/取消写接口，号码按供应商到期策略自动结束。

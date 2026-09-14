@@ -235,6 +235,7 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 		{domain.ProviderHeroSMS, "HeroSMS", s.config.HeroSMSBaseURL, int(s.config.ReconcileInterval.Seconds())},
 		{domain.ProviderSMSBower, "SMSBower", s.config.SMSBowerBaseURL, int(s.config.ReconcileInterval.Seconds())},
 		{domain.ProviderSMSPool, "SMSPool", s.config.SMSPoolBaseURL, int(s.config.PollInterval.Seconds())},
+		{domain.ProviderSMSPin, "SMSPin", s.config.SMSPinBaseURL, int(s.config.PollInterval.Seconds())},
 	}
 	ps := make([]domain.Provider, 0, len(defaults))
 	for _, d := range defaults {
@@ -1789,7 +1790,7 @@ func validateProviderURL(ctx context.Context, providerID, raw string, production
 	if u.Scheme != "https" || u.Port() != "" {
 		return nil, ErrBadRequest
 	}
-	allowed := map[string]string{domain.ProviderHeroSMS: "hero-sms.com", domain.ProviderSMSBower: "smsbower.page", domain.ProviderSMSPool: "api.smspool.net"}[domain.NormalizeProvider(providerID)]
+	allowed := map[string]string{domain.ProviderHeroSMS: "hero-sms.com", domain.ProviderSMSBower: "smsbower.page", domain.ProviderSMSPool: "api.smspool.net", domain.ProviderSMSPin: "smspin.io"}[domain.NormalizeProvider(providerID)]
 	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
 	if allowed == "" || (host != allowed && !strings.HasSuffix(host, "."+allowed)) {
 		return nil, ErrBadRequest

@@ -185,7 +185,7 @@ onBeforeUnmount(() => {
             <p>连接与余额信息</p>
           </div>
           <span class="health-summary">
-            {{ overview?.providerHealthy ?? 0 }}/{{ overview?.providerTotal ?? 3 }} 正常
+            {{ overview?.providerHealthy ?? 0 }}/{{ overview?.providerTotal ?? 4 }} 正常
           </span>
         </header>
 
@@ -221,4 +221,3 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
-
