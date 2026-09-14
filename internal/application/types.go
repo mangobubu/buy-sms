@@ -221,7 +221,11 @@ func OrderView(o domain.Order, webhook bool, now time.Time) OrderDTO {
 	}
 	messages := make([]SMSDTO, 0, len(o.Messages))
 	for _, m := range o.Messages {
-		messages = append(messages, SMSDTO{ID: m.ID, Code: m.Code, Content: m.Text, ReceivedAt: m.ReceivedAt})
+		providerID := m.ProviderID
+		if providerID == "" {
+			providerID = o.ProviderID
+		}
+		messages = append(messages, SMSDTO{ID: m.ID, Code: displaySMSCode(providerID, m.Code, m.Text), Content: m.Text, ReceivedAt: m.ReceivedAt})
 	}
 	cancel := EvaluateCancelPolicy(o, now)
 	var waitSeconds *int
