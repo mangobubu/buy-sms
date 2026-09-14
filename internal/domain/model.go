@@ -82,6 +82,7 @@ type Order struct {
 	QualityTier                string       `json:"tier,omitempty"`
 	Duration                   string       `json:"duration,omitempty"`
 	Status                     string       `json:"status"`
+	PersonalUsed               bool         `json:"personalUsed"`
 	Cost                       float64      `json:"cost"`
 	Currency                   string       `json:"currency"`
 	CanGetAnotherSMS           bool         `json:"canGetAnotherSms"`

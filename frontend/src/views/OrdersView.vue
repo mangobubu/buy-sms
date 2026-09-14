@@ -31,7 +31,7 @@ withDefaults(defineProps<{ embedded?: boolean }>(), {
 const loading = ref(false)
 const refreshing = ref(false)
 const actionOrderId = ref('')
-const actionType = ref<'complete' | 'close-local' | 'cancel' | 'renew' | ''>('')
+const actionType = ref<'complete' | 'close-local' | 'cancel' | 'renew' | 'mark-used' | ''>('')
 const orders = ref<NumberOrder[]>([])
 const total = ref(0)
 const lastRefreshedAt = ref<Date | null>(null)
@@ -62,6 +62,35 @@ const renewalIntentStore = createRenewalIntentStore({
   storage: sessionStorage,
   createKey: createRenewalIdempotencyKey,
 })
+
+function isCompletedOrder(order: NumberOrder): boolean {
+  return order.status?.trim().toLowerCase() === 'completed'
+}
+
+function isOrderUsed(order: NumberOrder): boolean {
+  return order.personalUsed === true
+}
+
+async function setOrderUsed(order: NumberOrder, used: boolean): Promise<void> {
+  if (!isCompletedOrder(order) || Boolean(order.personalUsed) === used || actionOrderId.value) return
+  const previousValue = Boolean(order.personalUsed)
+  actionOrderId.value = order.id
+  actionType.value = 'mark-used'
+  applyOrderMutation({ ...order, personalUsed: used })
+  try {
+    const updatedOrder = await ordersApi.setPersonalUsed(order.id, used)
+    applyOrderMutation(updatedOrder)
+    await load({ silent: true })
+  } catch (reason) {
+    const currentOrder = orders.value.find((item) => item.id === order.id)
+    if (currentOrder) applyOrderMutation({ ...currentOrder, personalUsed: previousValue })
+    ElMessage.error(errorMessage(reason, '更新号码标记失败'))
+    await load({ silent: true })
+  } finally {
+    actionOrderId.value = ''
+    actionType.value = ''
+  }
+}
 const selectedRenewalOption = computed<RenewalOption | undefined>(() =>
   renewalDialogQuote.value?.options.find((option) => renewalOptionKey(option) === renewalSelectedKey.value),
 )
@@ -75,6 +104,7 @@ const query = reactive<OrderQuery>({
   status: '',
   provider: '',
   keyword: '',
+  personalUsed: '',
 })
 
 const liveCount = computed(
@@ -117,6 +147,13 @@ async function drainLoads(initialIntent: { silent: boolean }): Promise<void> {
         const result = await ordersApi.list({ ...query })
         if (requestRevision === mutationRevision) {
           normalizeResult(result)
+          if (!Array.isArray(result) && orders.value.length === 0 && total.value > 0 && query.page > 1) {
+            const lastPage = Math.max(1, Math.ceil(total.value / query.pageSize))
+            if (lastPage < query.page) {
+              query.page = lastPage
+              pendingReload = { silent: currentIntent.silent }
+            }
+          }
           lastRefreshedAt.value = new Date()
         }
       } catch (reason) {
@@ -152,6 +189,7 @@ function resetFilters(): void {
   query.status = ''
   query.provider = ''
   query.keyword = ''
+  query.personalUsed = ''
   query.page = 1
   void load()
 }
@@ -471,6 +509,7 @@ function revealLatest(): Promise<void> {
   query.status = ''
   query.provider = ''
   query.keyword = ''
+  query.personalUsed = ''
   return load()
 }
 
@@ -528,6 +567,10 @@ onBeforeUnmount(() => {
         <el-option label="已完成" value="completed" />
         <el-option label="已取消" value="cancelled" />
         <el-option label="已过期" value="expired" />
+      </el-select>
+      <el-select v-model="query.personalUsed" clearable placeholder="全部标记" @change="search">
+        <el-option label="未用" value="false" />
+        <el-option label="已用" value="true" />
       </el-select>
       <el-select v-model="query.provider" clearable placeholder="全部供应商" @change="search">
         <el-option label="HeroSMS" value="herosms" />
@@ -653,6 +696,19 @@ onBeforeUnmount(() => {
                   {{ cancelPresentation(scope.row).buttonText }}
                 </el-button>
               </div>
+              <el-switch
+                v-if="isCompletedOrder(scope.row)"
+                class="order-usage-switch"
+                :model-value="isOrderUsed(scope.row)"
+                inline-prompt
+                active-text="已用"
+                inactive-text="未用"
+                :loading="actionType === 'mark-used' && actionOrderId === scope.row.id"
+                :disabled="Boolean(actionOrderId)"
+                title="仅作为本站个人标记，不影响接码平台"
+                :aria-label="isOrderUsed(scope.row) ? '标记为未用' : '标记为已用'"
+                @change="setOrderUsed(scope.row, Boolean($event))"
+              />
               <small v-if="cancelPresentation(scope.row).hint" class="cancel-hint">
                 {{ cancelPresentation(scope.row).hint }}
               </small>
@@ -719,6 +775,19 @@ onBeforeUnmount(() => {
           >
             {{ cancelPresentation(order).buttonText }}
           </el-button>
+          <el-switch
+            v-if="isCompletedOrder(order)"
+            class="order-usage-switch"
+            :model-value="isOrderUsed(order)"
+            inline-prompt
+            active-text="已用"
+            inactive-text="未用"
+            :loading="actionType === 'mark-used' && actionOrderId === order.id"
+            :disabled="Boolean(actionOrderId)"
+            title="仅作为本站个人标记，不影响接码平台"
+            :aria-label="isOrderUsed(order) ? '标记为未用' : '标记为已用'"
+            @change="setOrderUsed(order, Boolean($event))"
+          />
           <el-button link @click="toggleMobileOrder(order.id)">{{ expandedOrders.includes(order.id) ? '收起短信' : '查看短信' }}</el-button>
         </div>
         <p v-if="cancelPresentation(order).hint" class="mobile-cancel-hint">

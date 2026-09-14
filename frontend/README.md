@@ -55,7 +55,8 @@ npm run build
 | GET | `/catalog/quote?provider=&country=&service=&tier=` | 实时报价；`tier` 仅用于 SMSBower |
 | GET | `/catalog/durations?provider=herosms&country=&service=` | HeroSMS 当前服务与国家可购买的短时、长租时长及对应价格和库存 |
 | POST | `/orders` | 购买号码；body 可带 SMSBower `tier` 或 HeroSMS `duration`，且必须携带 16–128 字符的 `Idempotency-Key` 请求头 |
-| GET | `/orders` | 分页订单列表；每项通过可选的 `expiresAt`（RFC 3339）返回供应商给出的号码截止时间 |
+| GET | `/orders` | 分页订单列表；可通过 `personalUsed=true/false` 筛选已完成号码的本站未用/已用标记；每项通过可选的 `expiresAt`（RFC 3339）返回供应商给出的号码截止时间 |
+| PUT | `/orders/:id/personal-used` | 仅更新已完成订单的本站个人未用/已用标记；body 为 `personalUsed: boolean`，不调用供应商 |
 | GET | `/orders/:id` | 订单详情 |
 | GET | `/orders/:id/renewal-options` | 查询供应商当前允许的续期或重新启用选项及报价 |
 | POST | `/orders/:id/renew` | 按所选选项续期或重新启用号码；必须携带 16–128 字符的 `Idempotency-Key` 请求头 |

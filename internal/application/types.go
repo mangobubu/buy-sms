@@ -64,6 +64,7 @@ type OrderDTO struct {
 	Duration                     string     `json:"duration,omitempty"`
 	Status                       string     `json:"status"`
 	LocalCompleted               bool       `json:"localCompleted,omitempty"`
+	PersonalUsed                 bool       `json:"personalUsed"`
 	Price                        string     `json:"price"`
 	Currency                     string     `json:"currency"`
 	Messages                     []SMSDTO   `json:"messages"`
@@ -105,9 +106,14 @@ type PurchaseAttemptDTO struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
+type PersonalUsedInput struct {
+	PersonalUsed *bool `json:"personalUsed"`
+}
+
 type OrderQuery struct {
 	Page, PageSize            int
 	Status, Provider, Keyword string
+	PersonalUsed              *bool
 }
 type Page[T any] struct {
 	Items    []T `json:"items"`
@@ -232,7 +238,7 @@ func OrderView(o domain.Order, webhook bool, now time.Time) OrderDTO {
 	if cancel.WaitSeconds > 0 {
 		waitSeconds = &cancel.WaitSeconds
 	}
-	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Duration: o.Duration, Status: status, LocalCompleted: o.Status == domain.OrderCompleted && o.LastProviderState == "user_local_complete", Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, CurrentActivationHasMessages: hasCurrentActivationMessage(o), RenewalPending: o.RenewalInflight, WebhookEnabled: webhook, ExpiresAt: o.ExpiresAt, CanCancel: cancel.Allowed, CancelAvailableAt: cancel.AvailableAt, CancelWaitSeconds: waitSeconds, CancelUnavailableReason: cancel.UnavailableReason, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+	return OrderDTO{ID: o.ID, Provider: o.ProviderID, ProviderName: providerName(o.ProviderID), PhoneNumber: o.PhoneNumber, CountryCode: o.CountryCode, CountryName: o.CountryName, ServiceCode: o.ServiceCode, ServiceName: o.ServiceName, QualityTier: o.QualityTier, Duration: o.Duration, Status: status, LocalCompleted: o.Status == domain.OrderCompleted && o.LastProviderState == "user_local_complete", PersonalUsed: o.PersonalUsed, Price: strconv.FormatFloat(o.Cost, 'f', -1, 64), Currency: o.Currency, Messages: messages, CurrentActivationHasMessages: hasCurrentActivationMessage(o), RenewalPending: o.RenewalInflight, WebhookEnabled: webhook, ExpiresAt: o.ExpiresAt, CanCancel: cancel.Allowed, CancelAvailableAt: cancel.AvailableAt, CancelWaitSeconds: waitSeconds, CancelUnavailableReason: cancel.UnavailableReason, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
 
 // LocalCompleteInput is an explicit operator acknowledgement used only for

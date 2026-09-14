@@ -223,6 +223,7 @@ export interface NumberOrder {
   phoneNumber: string
   status: OrderStatus | string
   localCompleted?: boolean
+  personalUsed?: boolean
   price: string
   currency: string
   messages: SmsMessage[]
@@ -245,6 +246,7 @@ export interface OrderQuery {
   status?: string
   provider?: string
   keyword?: string
+  personalUsed?: '' | 'false' | 'true'
 }
 
 export interface SystemUser {

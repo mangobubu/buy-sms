@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS orders (
     quality_tier text NOT NULL DEFAULT '',
     duration text NOT NULL DEFAULT '',
     status text NOT NULL CHECK (status IN ('active','completed','canceled','expired')),
+    personal_used boolean NOT NULL DEFAULT false,
     cost numeric(18,6) NOT NULL DEFAULT 0,
     currency text NOT NULL DEFAULT 'USD',
     can_get_another_sms boolean NOT NULL DEFAULT true,
@@ -135,6 +136,7 @@ UPDATE orders SET activation_started_at=created_at WHERE activation_started_at I
 ALTER TABLE orders ALTER COLUMN activation_started_at SET DEFAULT now();
 ALTER TABLE orders ALTER COLUMN activation_started_at SET NOT NULL;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS non_refundable boolean NOT NULL DEFAULT false;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS personal_used boolean NOT NULL DEFAULT false;
 DO $$
 BEGIN
     IF NOT EXISTS (

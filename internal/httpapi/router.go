@@ -68,6 +68,7 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.GET("/orders", h.orders)
 	authed.GET("/orders/:id", h.order)
 	authed.POST("/orders/:id/complete", h.completeOrder)
+	authed.PUT("/orders/:id/personal-used", h.setOrderPersonalUsed)
 	authed.POST("/orders/:id/close-local", h.localCompleteOrder)
 	authed.POST("/orders/:id/cancel", h.cancelOrder)
 	authed.GET("/orders/:id/renewal-options", h.renewalOptions)
@@ -327,7 +328,21 @@ func (h *Handler) purchaseAttempts(c *gin.Context) {
 func (h *Handler) orders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	size, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	value, err := h.app.Orders(c.Request.Context(), application.OrderQuery{Page: page, PageSize: size, Status: c.Query("status"), Provider: c.Query("provider"), Keyword: c.Query("keyword")}, currentUser(c))
+	var personalUsed *bool
+	personalUsedQuery := strings.ToLower(strings.TrimSpace(c.Query("personalUsed")))
+	switch personalUsedQuery {
+	case "", "all":
+	case "used", "true":
+		value := true
+		personalUsed = &value
+	case "unused", "false":
+		value := false
+		personalUsed = &value
+	default:
+		bad(c, "标记筛选参数不正确")
+		return
+	}
+	value, err := h.app.Orders(c.Request.Context(), application.OrderQuery{Page: page, PageSize: size, Status: c.Query("status"), Provider: c.Query("provider"), Keyword: c.Query("keyword"), PersonalUsed: personalUsed}, currentUser(c))
 	if err != nil {
 		respondError(c, err)
 		return
@@ -342,6 +357,23 @@ func (h *Handler) order(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, value)
 }
+func (h *Handler) setOrderPersonalUsed(c *gin.Context) {
+	var in application.PersonalUsedInput
+	if !bind(c, &in) {
+		return
+	}
+	if in.PersonalUsed == nil {
+		bad(c, "请求数据格式不正确")
+		return
+	}
+	value, err := h.app.SetOrderPersonalUsed(c.Request.Context(), c.Param("id"), *in.PersonalUsed, currentUser(c), c.ClientIP())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, value)
+}
+
 func (h *Handler) renewalOptions(c *gin.Context) {
 	value, err := h.app.RenewalOptions(c.Request.Context(), c.Param("id"), currentUser(c))
 	if err != nil {

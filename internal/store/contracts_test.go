@@ -18,8 +18,8 @@ type maintenanceContract interface {
 type orderNameSnapshotRow struct{}
 
 func (orderNameSnapshotRow) Scan(dest ...any) error {
-	if len(dest) != 39 {
-		return fmt.Errorf("订单扫描列数=%d，期望 39", len(dest))
+	if len(dest) != 40 {
+		return fmt.Errorf("订单扫描列数=%d，期望 40", len(dest))
 	}
 	*dest[5].(*string) = "10"
 	*dest[6].(*string) = "目录国家名称"
@@ -35,6 +35,7 @@ func (orderNameSnapshotRow) Scan(dest ...any) error {
 	*dest[32].(*string) = "{}"
 	*dest[34].(*time.Time) = time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
 	*dest[35].(*bool) = true
+	*dest[39].(*bool) = true
 	return nil
 }
 func TestOrderNameSnapshotsAreIncludedInInsertAndScanContracts(t *testing.T) {
@@ -71,6 +72,9 @@ func TestOrderNameSnapshotsAreIncludedInInsertAndScanContracts(t *testing.T) {
 	if scanned.ActivationStartedAt.IsZero() || !scanned.NonRefundable {
 		t.Fatalf("订单当前激活周期扫描错误: %+v", scanned)
 	}
+	if !scanned.PersonalUsed {
+		t.Fatalf("订单个人标记扫描错误: %+v", scanned)
+	}
 	insert := strings.ToLower(insertOrderSQL)
 	for _, fragment := range []string{
 		"country_code,country_name,service_code,service_name,quality_tier,duration",
@@ -95,6 +99,7 @@ func TestOrderNameMigrationAndCatalogBackfillContracts(t *testing.T) {
 		"alter table orders add column if not exists country_name text",
 		"alter table orders add column if not exists service_name text",
 		"alter table orders add column if not exists duration text not null default ''",
+		"alter table orders add column if not exists personal_used boolean not null default false",
 		"alter table purchase_requests add column if not exists duration text not null default ''",
 		"update orders as o",
 		"pc.kind = 'country'",
@@ -165,6 +170,7 @@ func TestDashboardTodayCostIncludesOnlyCompletedOrders(t *testing.T) {
 }
 
 var _ maintenanceContract = (*Postgres)(nil)
+var _ PersonalUsedRepository = (*Postgres)(nil)
 
 // Maintenance 的 SQL 执行依赖真实 pgx 连接，当前 Postgres 没有可注入的窄
 // 执行接口。这里锁定迁移与清理契约，真实删除行为留给隔离 PostgreSQL 集成测。

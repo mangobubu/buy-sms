@@ -1113,7 +1113,14 @@ func (s *Service) Orders(ctx context.Context, q OrderQuery, user domain.User) (P
 	if q.Provider != "" {
 		providerID = domain.NormalizeProvider(q.Provider)
 	}
-	orders, total, err := s.repo.SearchOrders(ctx, scope, status, providerID, strings.TrimSpace(q.Keyword), q.PageSize, (q.Page-1)*q.PageSize)
+	var orders []domain.Order
+	var total int
+	var err error
+	if usageRepo, ok := s.repo.(store.PersonalUsedRepository); ok {
+		orders, total, err = usageRepo.SearchOrdersWithPersonalUsed(ctx, scope, status, providerID, strings.TrimSpace(q.Keyword), q.PersonalUsed, q.PageSize, (q.Page-1)*q.PageSize)
+	} else {
+		orders, total, err = s.repo.SearchOrders(ctx, scope, status, providerID, strings.TrimSpace(q.Keyword), q.PageSize, (q.Page-1)*q.PageSize)
+	}
 	if err != nil {
 		return Page[OrderDTO]{}, err
 	}
@@ -1123,6 +1130,33 @@ func (s *Service) Orders(ctx context.Context, q OrderQuery, user domain.User) (P
 		out = append(out, s.orderView(o, readSettings(p.Config).WebhookEnabled))
 	}
 	return Page[OrderDTO]{Items: out, Total: total, Page: q.Page, PageSize: q.PageSize}, nil
+}
+
+// SetOrderPersonalUsed updates the private used/unused marker for a completed order.
+// It never calls a provider and does not alter the order lifecycle state.
+func (s *Service) SetOrderPersonalUsed(ctx context.Context, id string, used bool, user domain.User, ip string) (OrderDTO, error) {
+	scope := ""
+	if user.Role != "admin" {
+		scope = user.ID
+	}
+	o, err := s.repo.GetOrder(ctx, id, scope)
+	if err != nil {
+		return OrderDTO{}, mapStore(err)
+	}
+	if o.Status != domain.OrderCompleted {
+		return OrderDTO{}, ErrConflict
+	}
+	usageRepo, ok := s.repo.(store.PersonalUsedRepository)
+	if !ok {
+		return OrderDTO{}, fmt.Errorf("个人标记存储不可用")
+	}
+	if err = usageRepo.SetOrderPersonalUsed(ctx, id, scope, used); err != nil {
+		return OrderDTO{}, mapStore(err)
+	}
+	o.PersonalUsed = used
+	_ = s.repo.Audit(ctx, &user.ID, "order.personal_used", "order", o.ID, ip, nil)
+	p, _ := s.repo.GetProvider(ctx, o.ProviderID)
+	return s.orderView(o, readSettings(p.Config).WebhookEnabled), nil
 }
 func (s *Service) Order(ctx context.Context, id string, user domain.User) (OrderDTO, error) {
 	scope := ""

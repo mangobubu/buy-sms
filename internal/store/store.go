@@ -77,6 +77,13 @@ type Repository interface {
 	Close()
 }
 
+// PersonalUsedRepository persists the private used/unused marker and supports
+// filtering orders by that marker. It is optional so lightweight repositories
+// used by lifecycle tests remain compatible.
+type PersonalUsedRepository interface {
+	SearchOrdersWithPersonalUsed(context.Context, string, string, string, string, *bool, int, int) ([]domain.Order, int, error)
+	SetOrderPersonalUsed(context.Context, string, string, bool) error
+}
 type RenewalRecord struct {
 	ID, UserID, OrderID, IdempotencyKey, ProviderID, UpstreamID string
 	Mode, Unit, Status, ErrorCode                               string

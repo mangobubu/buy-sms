@@ -550,11 +550,11 @@ func (s *Postgres) FailPurchase(ctx context.Context, id, status, code string) er
 	return err
 }
 
-const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.duration,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,COALESCE(o.renewal_request_id::text,''),o.renewal_inflight,o.renewal_inflight_at,o.renewal_mode,o.renewal_value,o.renewal_unit,o.renewal_quoted_price::float8,o.renewal_baseline,o.renewal_submitted_at,o.activation_started_at,o.non_refundable,o.expires_at,o.created_at,o.updated_at`
+const orderCols = `o.id,o.user_id,o.provider_id,o.upstream_id,o.phone_number,o.country_code,COALESCE(o.country_name,''),o.service_code,COALESCE(o.service_name,''),o.quality_tier,o.duration,o.status,o.cost::float8,o.currency,o.can_get_another_sms,o.poll_sequence,o.last_provider_state,o.next_poll_at,o.poll_failures,o.request_next_pending,o.request_next_inflight,o.request_next_inflight_at,o.request_next_generation,o.request_next_claim_generation,o.request_next_failures,COALESCE(o.renewal_request_id::text,''),o.renewal_inflight,o.renewal_inflight_at,o.renewal_mode,o.renewal_value,o.renewal_unit,o.renewal_quoted_price::float8,o.renewal_baseline,o.renewal_submitted_at,o.activation_started_at,o.non_refundable,o.expires_at,o.created_at,o.updated_at,o.personal_used`
 
 func scanOrder(row pgx.Row) (domain.Order, error) {
 	var o domain.Order
-	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.CountryName, &o.ServiceCode, &o.ServiceName, &o.QualityTier, &o.Duration, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.RenewalRequestID, &o.RenewalInflight, &o.RenewalInflightAt, &o.RenewalMode, &o.RenewalValue, &o.RenewalUnit, &o.RenewalQuotedPrice, &o.RenewalBaseline, &o.RenewalSubmittedAt, &o.ActivationStartedAt, &o.NonRefundable, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	err := row.Scan(&o.ID, &o.UserID, &o.ProviderID, &o.UpstreamID, &o.PhoneNumber, &o.CountryCode, &o.CountryName, &o.ServiceCode, &o.ServiceName, &o.QualityTier, &o.Duration, &o.Status, &o.Cost, &o.Currency, &o.CanGetAnotherSMS, &o.PollSequence, &o.LastProviderState, &o.NextPollAt, &o.PollFailures, &o.RequestNextPending, &o.RequestNextInflight, &o.RequestNextInflightAt, &o.RequestNextGeneration, &o.RequestNextClaimGeneration, &o.RequestNextFailures, &o.RenewalRequestID, &o.RenewalInflight, &o.RenewalInflightAt, &o.RenewalMode, &o.RenewalValue, &o.RenewalUnit, &o.RenewalQuotedPrice, &o.RenewalBaseline, &o.RenewalSubmittedAt, &o.ActivationStartedAt, &o.NonRefundable, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.PersonalUsed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -595,15 +595,23 @@ func (s *Postgres) ListOrders(ctx context.Context, user string, limit, offset in
 	return out, rows.Err()
 }
 func (s *Postgres) SearchOrders(ctx context.Context, user, status, pid, keyword string, limit, offset int) ([]domain.Order, int, error) {
+	return s.searchOrders(ctx, user, status, pid, keyword, nil, limit, offset)
+}
+
+func (s *Postgres) SearchOrdersWithPersonalUsed(ctx context.Context, user, status, pid, keyword string, personalUsed *bool, limit, offset int) ([]domain.Order, int, error) {
+	return s.searchOrders(ctx, user, status, pid, keyword, personalUsed, limit, offset)
+}
+
+func (s *Postgres) searchOrders(ctx context.Context, user, status, pid, keyword string, personalUsed *bool, limit, offset int) ([]domain.Order, int, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	where := ` WHERE ($1='' OR o.user_id=NULLIF($1,'')::uuid) AND ($2='' OR o.status=$2) AND ($3='' OR o.provider_id=$3) AND ($4='' OR o.phone_number ILIKE '%'||$4||'%' OR o.id::text ILIKE '%'||$4||'%' OR o.upstream_id ILIKE '%'||$4||'%')`
+	where := ` WHERE ($1='' OR o.user_id=NULLIF($1,'')::uuid) AND ($2='' OR o.status=$2) AND ($3='' OR o.provider_id=$3) AND ($4='' OR o.phone_number ILIKE '%'||$4||'%' OR o.id::text ILIKE '%'||$4||'%' OR o.upstream_id ILIKE '%'||$4||'%') AND ($5::bool IS NULL OR (o.status='completed' AND o.personal_used=$5))`
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM orders o`+where, user, status, pid, keyword).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM orders o`+where, user, status, pid, keyword, personalUsed).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+orderCols+` FROM orders o`+where+` ORDER BY o.created_at DESC LIMIT $5 OFFSET $6`, user, status, pid, keyword, limit, offset)
+	rows, err := s.pool.Query(ctx, `SELECT `+orderCols+` FROM orders o`+where+` ORDER BY o.created_at DESC LIMIT $6 OFFSET $7`, user, status, pid, keyword, personalUsed, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -621,6 +629,25 @@ func (s *Postgres) SearchOrders(ctx context.Context, user, status, pid, keyword 
 		out = append(out, o)
 	}
 	return out, total, rows.Err()
+}
+
+func (s *Postgres) SetOrderPersonalUsed(ctx context.Context, id, user string, used bool) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE orders SET personal_used=$3,updated_at=now() WHERE id=$1 AND status='completed' AND ($2='' OR user_id=NULLIF($2,'')::uuid)`, id, user, used)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 1 {
+		return nil
+	}
+	var status string
+	err = s.pool.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 AND ($2='' OR user_id=NULLIF($2,'')::uuid)`, id, user).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	return ErrConflict
 }
 func (s *Postgres) WithOrderLock(ctx context.Context, id string, fn func(context.Context) error) error {
 	select {
@@ -860,6 +887,7 @@ func (s *Postgres) CompleteOrderRenewal(ctx context.Context, requestID, id, upst
 		phone_number=CASE WHEN BTRIM($4)='' THEN phone_number ELSE $4 END,
 		duration=$5,
 		status='active',
+		personal_used=false,
 		cost=$7,
 		can_get_another_sms=true,
 		poll_sequence=CASE WHEN upstream_id<>$3 THEN 0 ELSE poll_sequence END,
