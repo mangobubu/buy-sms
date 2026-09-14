@@ -2,12 +2,14 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"testing"
 
 	"buysms/internal/domain"
 	"buysms/internal/provider"
+	"buysms/internal/secure"
 )
 
 // TestSMSPinIsRegisteredInProviderFactory guards the application/provider
@@ -57,5 +59,30 @@ func TestSMSPinDevelopmentURLAllowsLocalMock(t *testing.T) {
 	}
 	if u.String() != server.URL {
 		t.Fatalf("development SMSPin URL=%q, want %q", u.String(), server.URL)
+	}
+}
+func TestSMSPinProviderViewIsPollingOnly(t *testing.T) {
+	vault, err := secure.NewVault([]byte("smspin-provider-view-test-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenCipher, err := vault.Encrypt("webhook-token-for-test-1234567890")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{vault: vault}
+	view, err := service.providerView(domain.Provider{
+		ID: domain.ProviderSMSPin, Name: "SMSPin", BaseURL: "https://smspin.io/api/v1",
+		WebhookConfigured: true, WebhookTokenCipher: tokenCipher,
+		Config: json.RawMessage(`{"pollingIntervalSeconds":10,"webhookEnabled":true}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.WebhookSupported || view.WebhookEnabled || view.HasWebhookToken || view.WebhookURL != "" {
+		t.Fatalf("SMSPin should be polling-only: %+v", view)
+	}
+	if view.PollingIntervalSeconds != 10 {
+		t.Fatalf("polling interval=%d, want 10", view.PollingIntervalSeconds)
 	}
 }

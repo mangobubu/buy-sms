@@ -503,7 +503,7 @@ func (s *Service) UpdateProvider(ctx context.Context, id string, in UpdateProvid
 	if in.PollingIntervalSeconds != 0 {
 		settings.PollingIntervalSeconds = clampInterval(in.PollingIntervalSeconds)
 	}
-	settings.WebhookEnabled = in.WebhookEnabled && len(p.WebhookTokenCipher) > 0
+	settings.WebhookEnabled = domain.NormalizeProvider(p.ID) != domain.ProviderSMSPin && in.WebhookEnabled && len(p.WebhookTokenCipher) > 0
 	p.Config, _ = json.Marshal(settings)
 	p.Enabled = in.Enabled
 	if err = s.repo.UpdateProvider(ctx, p); err != nil {
@@ -525,7 +525,13 @@ func (s *Service) providerView(p domain.Provider) (ProviderDTO, error) {
 		return ProviderDTO{}, err
 	}
 	configured := p.APIKeyConfigured || len(p.APIKeyCipher) > 0
-	return ProviderDTO{ID: p.ID, Code: p.ID, Name: p.Name, APIBaseURL: p.BaseURL, Enabled: p.Enabled, PollingIntervalSeconds: settings.PollingIntervalSeconds, WebhookSupported: true, WebhookEnabled: settings.WebhookEnabled, HasAPIKey: configured, Purchasable: p.Enabled && configured, HasWebhookToken: p.WebhookConfigured, WebhookURL: s.config.PublicBaseURL + "/api/webhooks/" + p.ID + "/" + url.PathEscape(token), UpdatedAt: p.UpdatedAt}, nil
+	webhookSupported := domain.NormalizeProvider(p.ID) != domain.ProviderSMSPin
+	webhookEnabled := webhookSupported && settings.WebhookEnabled
+	webhookURL := ""
+	if webhookSupported {
+		webhookURL = s.config.PublicBaseURL + "/api/webhooks/" + p.ID + "/" + url.PathEscape(token)
+	}
+	return ProviderDTO{ID: p.ID, Code: p.ID, Name: p.Name, APIBaseURL: p.BaseURL, Enabled: p.Enabled, PollingIntervalSeconds: settings.PollingIntervalSeconds, WebhookSupported: webhookSupported, WebhookEnabled: webhookEnabled, HasAPIKey: configured, Purchasable: p.Enabled && configured, HasWebhookToken: webhookSupported && p.WebhookConfigured, WebhookURL: webhookURL, UpdatedAt: p.UpdatedAt}, nil
 }
 
 func (s *Service) Countries(ctx context.Context, pid, service, tier string) ([]CountryDTO, error) {

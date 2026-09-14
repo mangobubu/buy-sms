@@ -120,7 +120,7 @@ onMounted(load)
           <span class="provider-logo large" :class="`provider-${row.provider.code}`">{{ providerName(row.provider.code).slice(0, 1) }}</span>
           <span class="provider-card-title">
             <strong>{{ row.provider.name || providerName(row.provider.code) }}</strong>
-            <small>{{ row.provider.webhookSupported ? 'Webhook 实时推送 + 轮询兜底' : '安全轮询接收验证码' }}</small>
+            <small>{{ row.provider.webhookSupported ? 'Webhook 实时推送 + 轮询兜底' : '仅轮询接收验证码' }}</small>
           </span>
           <el-switch
             v-model="row.draft.enabled"
