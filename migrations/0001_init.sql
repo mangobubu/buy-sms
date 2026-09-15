@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     quality_tier text NOT NULL DEFAULT '',
     duration text NOT NULL DEFAULT '',
     max_price numeric(18,6) NOT NULL,
+    price_mode text NOT NULL DEFAULT 'fixed',
     operator integer NOT NULL DEFAULT 0,
     status text NOT NULL CHECK(status IN ('provisioning','succeeded','unknown','failed')),
     order_id uuid REFERENCES orders(id),
@@ -249,6 +250,19 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS duration text NOT NULL DEFAULT '';
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS operator integer NOT NULL DEFAULT 0;
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS price_mode text NOT NULL DEFAULT 'fixed';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'purchase_requests_price_mode_check'
+          AND conrelid = 'purchase_requests'::regclass
+    ) THEN
+        ALTER TABLE purchase_requests ADD CONSTRAINT purchase_requests_price_mode_check
+            CHECK (price_mode IN ('fixed','bid'));
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS purchase_requests_user_created ON purchase_requests(user_id, created_at DESC);
 DO $$
 BEGIN

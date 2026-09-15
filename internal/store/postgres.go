@@ -459,7 +459,7 @@ func (s *Postgres) CreateOrder(ctx context.Context, o domain.Order) error {
 	return err
 }
 func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (PurchaseRecord, bool, error) {
-	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price,operator,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.QualityTier, r.Duration, r.MaxPrice, r.Operator)
+	ct, err := s.pool.Exec(ctx, `INSERT INTO purchase_requests(id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price,price_mode,operator,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'provisioning') ON CONFLICT(user_id,idempotency_key) DO NOTHING`, r.ID, r.UserID, r.IdempotencyKey, r.ProviderID, r.CountryCode, r.ServiceCode, r.QualityTier, r.Duration, r.MaxPrice, r.PriceMode, r.Operator)
 	if err != nil {
 		return PurchaseRecord{}, false, err
 	}
@@ -468,7 +468,7 @@ func (s *Postgres) ReservePurchase(ctx context.Context, r PurchaseRecord) (Purch
 		return r, true, nil
 	}
 	var existing PurchaseRecord
-	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price::float8,operator,status,COALESCE(order_id::text,''),COALESCE(error_code,''),created_at,updated_at FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.QualityTier, &existing.Duration, &existing.MaxPrice, &existing.Operator, &existing.Status, &existing.OrderID, &existing.ErrorCode, &existing.CreatedAt, &existing.UpdatedAt)
+	err = s.pool.QueryRow(ctx, `SELECT id,user_id,idempotency_key,provider_id,country_code,service_code,quality_tier,duration,max_price::float8,price_mode,operator,status,COALESCE(order_id::text,''),COALESCE(error_code,''),created_at,updated_at FROM purchase_requests WHERE user_id=$1 AND idempotency_key=$2`, r.UserID, r.IdempotencyKey).Scan(&existing.ID, &existing.UserID, &existing.IdempotencyKey, &existing.ProviderID, &existing.CountryCode, &existing.ServiceCode, &existing.QualityTier, &existing.Duration, &existing.MaxPrice, &existing.PriceMode, &existing.Operator, &existing.Status, &existing.OrderID, &existing.ErrorCode, &existing.CreatedAt, &existing.UpdatedAt)
 	return existing, false, err
 }
 
@@ -497,7 +497,7 @@ const listPurchaseRequestsSQL = `SELECT
         ORDER BY (pc.country = pr.country_code) DESC,pc.updated_at DESC,pc.country,pc.name
         LIMIT 1
     ),''),
-    pr.quality_tier,pr.duration,pr.max_price::float8,pr.operator,pr.status,
+    pr.quality_tier,pr.duration,pr.max_price::float8,pr.price_mode,pr.operator,pr.status,
     COALESCE(pr.order_id::text,''),COALESCE(pr.error_code,''),pr.created_at,pr.updated_at
 FROM purchase_requests AS pr
 WHERE pr.user_id=$1
@@ -516,7 +516,7 @@ func (s *Postgres) ListPurchaseRequests(ctx context.Context, userID string, limi
 	records := make([]PurchaseRecord, 0, limit)
 	for rows.Next() {
 		var record PurchaseRecord
-		if err = rows.Scan(&record.ID, &record.UserID, &record.IdempotencyKey, &record.ProviderID, &record.CountryCode, &record.CountryName, &record.ServiceCode, &record.ServiceName, &record.QualityTier, &record.Duration, &record.MaxPrice, &record.Operator, &record.Status, &record.OrderID, &record.ErrorCode, &record.CreatedAt, &record.UpdatedAt); err != nil {
+		if err = rows.Scan(&record.ID, &record.UserID, &record.IdempotencyKey, &record.ProviderID, &record.CountryCode, &record.CountryName, &record.ServiceCode, &record.ServiceName, &record.QualityTier, &record.Duration, &record.MaxPrice, &record.PriceMode, &record.Operator, &record.Status, &record.OrderID, &record.ErrorCode, &record.CreatedAt, &record.UpdatedAt); err != nil {
 			return nil, err
 		}
 		records = append(records, record)

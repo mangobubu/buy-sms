@@ -101,7 +101,8 @@ type RenewalRecord struct {
 }
 type PurchaseRecord struct {
 	ID, UserID, IdempotencyKey, ProviderID, CountryCode, CountryName, ServiceCode, ServiceName, QualityTier, Duration, Status, OrderID, ErrorCode string
-	MaxPrice                                                                                                                                      float64
+	MaxPrice                                                                                                                                      float64 `json:"-"`
+	PriceMode                                                                                                                                     string
 	Operator                                                                                                                                      int
 	CreatedAt, UpdatedAt                                                                                                                          time.Time
 }

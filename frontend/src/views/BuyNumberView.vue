@@ -98,6 +98,7 @@ const form = reactive({
   operator: undefined as number | undefined,
   priceSelection: '',
   maxPrice: '',
+  priceMode: 'fixed' as 'fixed' | 'bid',
 })
 
 const rules: FormRules = {
@@ -117,7 +118,35 @@ const rules: FormRules = {
     },
     trigger: 'change',
   }],
-  priceSelection: [{ required: true, message: '请选择价格', trigger: 'change' }],
+  priceSelection: [{
+    validator: (_rule, _value, callback) => {
+      if (form.provider === 'herosms' && form.duration === '' && form.priceMode === 'bid') {
+        callback()
+        return
+      }
+      if (form.priceSelection) {
+        callback()
+        return
+      }
+      callback(new Error('请选择价格'))
+    },
+    trigger: 'change',
+  }],
+  maxPrice: [{
+    validator: (_rule, value, callback) => {
+      if (!(form.provider === 'herosms' && form.duration === '' && form.priceMode === 'bid')) {
+        callback()
+        return
+      }
+      const text = String(value ?? '').trim()
+      if (!/^\d+(?:\.\d{1,4})?$/.test(text) || Number(text) <= 0) {
+        callback(new Error('请输入大于 0 的最高价格'))
+        return
+      }
+      callback()
+    },
+    trigger: ['change', 'blur'],
+  }],
 }
 
 function providerPurchasable(provider: ProviderConfig): boolean {
@@ -163,12 +192,14 @@ interface ProviderSelection {
   operator?: number
   priceSelection: string
   maxPrice: string
+  priceMode: 'fixed' | 'bid'
 }
 
 interface PersistedProviderSelection {
   serviceCode: string
   countryCode: string
   duration: string
+  priceMode?: 'fixed' | 'bid'
 }
 
 const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool', 'smspin']
@@ -211,8 +242,31 @@ const priceOptions = computed<DisplayPriceOption[]>(() => {
   }
   return quotes.value.flatMap(displayQuotePriceOptions)
 })
+const isHeroBidMode = computed(() =>
+  form.provider === 'herosms' && form.duration === '' && form.priceMode === 'bid',
+)
+const heroBidPriceBounds = computed(() => {
+  const prices = priceOptions.value.map((option) => Number(option.price)).filter((price) => Number.isFinite(price) && price > 0)
+  if (!prices.length) return null
+  return { min: Math.min(...prices), max: Math.max(...prices) }
+})
+const heroBidAvailable = computed(() => {
+  const maxPrice = Number(form.maxPrice)
+  if (!Number.isFinite(maxPrice) || maxPrice <= 0) return 0
+  return priceOptions.value
+    .filter((option) => Number(option.price) <= maxPrice && option.available > 0)
+    .reduce((total, option) => total + option.available, 0)
+})
+const heroBidOption = computed<DisplayPriceOption | null>(() => {
+  if (!isHeroBidMode.value) return null
+  const price = form.maxPrice.trim()
+  if (!/^\d+(?:\.\d{1,4})?$/.test(price) || Number(price) <= 0) return null
+  return { key: `bid:${price}`, price, available: heroBidAvailable.value, currency: 'USD', label: '我的出价' }
+})
 const selectedPriceOption = computed(() =>
-  priceOptions.value.find((option) => option.key === form.priceSelection),
+  isHeroBidMode.value
+    ? heroBidOption.value || undefined
+    : priceOptions.value.find((option) => option.key === form.priceSelection),
 )
 const priceSelectionPlaceholder = computed(() => {
   if (loadingQuote.value || loadingDurations.value) return '正在刷新价格'
@@ -254,6 +308,7 @@ function snapshotSelection(): ProviderSelection {
     operator: form.operator,
     priceSelection: form.priceSelection,
     maxPrice: form.maxPrice,
+    priceMode: form.priceMode,
   }
 }
 
@@ -278,7 +333,7 @@ function readPersistedFormSelections(): ProviderCode | '' {
       for (const provider of providerCodes) {
         const raw = parsed.selections[provider]
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue
-        const selection = raw as { serviceCode?: unknown; countryCode?: unknown; duration?: unknown }
+        const selection = raw as { serviceCode?: unknown; countryCode?: unknown; duration?: unknown; priceMode?: unknown }
         const serviceCode = typeof selection.serviceCode === 'string' ? selection.serviceCode : ''
         const countryCode = typeof selection.countryCode === 'string' ? selection.countryCode : ''
         const duration = provider === 'herosms' && typeof selection.duration === 'string'
@@ -291,6 +346,8 @@ function readPersistedFormSelections(): ProviderCode | '' {
           tier: '',
           priceSelection: '',
           maxPrice: '',
+          priceMode: 'fixed',
+          ...(selection.priceMode === 'bid' ? { priceMode: 'bid' as const } : {}),
         }
       }
     }
@@ -316,6 +373,7 @@ function persistFormSelections(): void {
       serviceCode: selection.serviceCode,
       countryCode: selection.countryCode,
       duration: provider === 'herosms' ? selection.duration : '',
+      ...(provider === 'herosms' && selection.priceMode === 'bid' ? { priceMode: 'bid' } : {}),
     }
   }
   try {
@@ -348,6 +406,7 @@ function resetSelectedPrice(): void {
 }
 
 function selectPrice(selection: string): void {
+  form.priceMode = 'fixed'
   form.priceSelection = selection
   const option = priceOptions.value.find((item) => item.key === selection)
   form.tier = option?.tier || ''
@@ -356,12 +415,47 @@ function selectPrice(selection: string): void {
   saveCurrentSelection()
 }
 
+function selectHeroPriceMode(mode: 'fixed' | 'bid'): void {
+  if (form.provider !== 'herosms' || form.duration !== '' || purchasing.value) return
+  form.priceMode = mode
+  if (mode === 'fixed') {
+    const next = priceOptions.value.find((option) => option.key === form.priceSelection) || priceOptions.value[0]
+    selectPrice(next?.key || '')
+  } else {
+    form.priceSelection = ''
+    form.tier = ''
+    form.operator = undefined
+    if (!form.maxPrice && heroBidPriceBounds.value) {
+      form.maxPrice = heroBidPriceBounds.value.min.toFixed(4)
+    }
+    saveCurrentSelection()
+  }
+  formRef.value?.clearValidate(['priceSelection', 'maxPrice'])
+}
+
+function normalizeHeroBidPrice(): void {
+  const text = form.maxPrice.trim()
+  if (!/^\d+(?:\.\d{1,4})?$/.test(text)) return
+  const value = Number(text)
+  if (Number.isFinite(value) && value > 0) form.maxPrice = value.toFixed(4)
+  saveCurrentSelection()
+  formRef.value?.validateField('maxPrice')
+}
+
+function setHeroBidSlider(value: number | number[]): void {
+  const next = Array.isArray(value) ? value[0] : value
+  if (typeof next !== 'number' || !Number.isFinite(next)) return
+  form.maxPrice = next.toFixed(4)
+  normalizeHeroBidPrice()
+}
+
 function selectDuration(selection: string): void {
   const option = durationOptions.value.find((item) => durationOptionKey(item) === selection)
   if (!option || option.available < 1) return
   quoteGeneration += 1
   loadingQuote.value = false
   form.duration = option.value
+  if (option.value) form.priceMode = 'fixed'
   resetSelectedPrice()
   quotes.value = []
   selectPrice(priceOptions.value[0]?.key || '')
@@ -654,7 +748,10 @@ async function loadHeroPurchaseOptions(options: {
   duration?: string
   priceSelection?: string
   requirePriceSelection?: boolean
+  priceMode?: 'fixed' | 'bid'
 } = {}): Promise<void> {
+  const requestedPriceMode = options.priceMode || form.priceMode
+  const requestedMaxPrice = form.maxPrice
   const loadedDurations = await loadDurations()
   if (!loadedDurations) return
   const requestedDuration = options.duration || ''
@@ -681,7 +778,17 @@ async function loadHeroPurchaseOptions(options: {
     return
   }
   if (selectedDuration.value) {
+    form.priceMode = 'fixed'
     selectPrice(options.requirePriceSelection ? '' : priceOptions.value[0]?.key || '')
+    return
+  }
+  if (requestedPriceMode === 'bid') {
+    form.priceMode = 'bid'
+    form.priceSelection = ''
+    form.tier = ''
+    form.operator = undefined
+    form.maxPrice = requestedMaxPrice || (heroBidPriceBounds.value ? heroBidPriceBounds.value.min.toFixed(4) : '')
+    saveCurrentSelection()
     return
   }
   const savedPrice = selectedDuration.value === requestedDuration
@@ -710,10 +817,12 @@ async function restoreProviderSelection(provider: ProviderCode, selection?: Prov
 
     form.countryCode = selection.countryCode
     form.priceSelection = selection.priceSelection
+    form.priceMode = provider === 'herosms' && selection.priceMode === 'bid' ? 'bid' : 'fixed'
     if (provider === 'herosms') {
       await loadHeroPurchaseOptions({
         duration: selection.duration,
         priceSelection: selection.priceSelection,
+        priceMode: selection.priceMode,
         requirePriceSelection: !selection.priceSelection,
       })
     } else {
@@ -746,6 +855,7 @@ watch(
     form.operator = undefined
     form.priceSelection = ''
     form.maxPrice = ''
+    form.priceMode = 'fixed'
     services.value = []
     countries.value = []
     durationOptions.value = []
@@ -835,6 +945,7 @@ interface PurchaseConditionSnapshot {
   durationLabel: string
   operator?: number
   maxPrice: string
+  priceMode: 'fixed' | 'bid'
 }
 
 function purchaseIntentStorageKey(): string {
@@ -868,6 +979,7 @@ function purchaseConditionsStillSelected(conditions: PurchaseConditionSnapshot):
     form.countryCode === conditions.countryCode &&
     form.operator === conditions.operator &&
     (form.provider === 'herosms' ? form.duration : '') === conditions.duration &&
+    form.priceMode === conditions.priceMode &&
     form.maxPrice.trim() === conditions.maxPrice
   )
 }
@@ -944,6 +1056,7 @@ async function purchase(): Promise<void> {
         ? durationOptionLabel(selectedDurationOption.value)
         : '标准接码',
       maxPrice: form.maxPrice.trim(),
+      priceMode: form.priceMode,
     }
     requestSignature = createPurchaseSignature(requestConditions)
     const requestKey = await getOrCreatePurchaseIntentKey(
@@ -968,6 +1081,7 @@ async function purchase(): Promise<void> {
         ? loadHeroPurchaseOptions({
             duration: requestConditions.duration,
             priceSelection: form.priceSelection,
+            priceMode: requestConditions.priceMode,
           })
         : loadQuote()
       await Promise.all([ordersRef.value?.revealLatest(), refreshPurchaseOptions, forceLoadProviderBalances()])
@@ -1157,29 +1271,54 @@ onBeforeUnmount(() => {
             <p class="form-help">可购时长、价格和库存均来自 HeroSMS 实时接口；标准接码仍可继续选择价格档位。</p>
           </el-form-item>
 
-          <el-form-item label="选择价格" prop="priceSelection">
-            <el-select
-              :model-value="form.priceSelection"
-              :loading="loadingQuote"
-              :disabled="purchasing || !priceOptions.length || loadingQuote"
-              :placeholder="priceSelectionPlaceholder"
-              style="width: 100%"
-              @change="selectPrice"
-            >
-              <el-option
-                v-for="priceQuote in priceOptions"
-                :key="priceQuote.key"
-                :label="priceOptionLabel(priceQuote)"
-                :value="priceQuote.key"
-              >
-                <span class="select-option-main">{{ priceOptionLabel(priceQuote) }}</span>
-                <small>{{ priceQuote.available }} 个可用</small>
-              </el-option>
+          <el-form-item :label="isHeroBidMode ? '出价模式' : '选择价格'" prop="priceSelection">
+            <div v-if="form.provider === 'herosms' && form.duration === ''" class="hero-price-panel">
+              <div class="hero-price-tabs" role="tablist" aria-label="HeroSMS 价格模式">
+                <button type="button" :class="{ active: form.priceMode === 'fixed' }" :disabled="purchasing" @click="selectHeroPriceMode('fixed')">报价列表</button>
+                <button type="button" :class="{ active: form.priceMode === 'bid' }" :disabled="purchasing" @click="selectHeroPriceMode('bid')">我的出价</button>
+              </div>
+              <template v-if="form.priceMode === 'fixed'">
+                <el-select
+                  :model-value="form.priceSelection"
+                  :loading="loadingQuote"
+                  :disabled="purchasing || !priceOptions.length || loadingQuote"
+                  :placeholder="priceSelectionPlaceholder"
+                  style="width: 100%"
+                  @change="selectPrice"
+                >
+                  <el-option v-for="priceQuote in priceOptions" :key="priceQuote.key" :label="priceOptionLabel(priceQuote)" :value="priceQuote.key">
+                    <span class="select-option-main">{{ priceOptionLabel(priceQuote) }}</span><small>{{ priceQuote.available }} 个可用</small>
+                  </el-option>
+                </el-select>
+              </template>
+              <template v-else>
+                <p class="hero-bid-hint">请输入您愿意购买的最高价格，以查看可用优惠。</p>
+                <el-form-item prop="maxPrice" class="hero-bid-input-item">
+                  <el-input v-model="form.maxPrice" type="number" step="0.0001" min="0" placeholder="最高价格" @blur="normalizeHeroBidPrice">
+                    <template #prefix>$</template>
+                  </el-input>
+                </el-form-item>
+                <div v-if="heroBidPriceBounds" class="hero-bid-range"><span>${{ heroBidPriceBounds.min.toFixed(4) }}</span><span>${{ heroBidPriceBounds.max.toFixed(4) }}</span></div>
+                <el-slider
+                  v-if="heroBidPriceBounds"
+                  :model-value="Number(form.maxPrice) || heroBidPriceBounds.min"
+                  :min="heroBidPriceBounds.min"
+                  :max="heroBidPriceBounds.max"
+                  :step="0.0001"
+                  :disabled="purchasing || !priceOptions.length"
+                  @change="setHeroBidSlider"
+                />
+                <p class="hero-bid-stock">库存 - {{ heroBidAvailable }} 个</p>
+                <p class="hero-bid-average" v-if="heroBidPriceBounds">当前最低报价 - {{ formatMoney(heroBidPriceBounds.min, 'USD') }}</p>
+              </template>
+            </div>
+            <el-select v-else :model-value="form.priceSelection" :loading="loadingQuote" :disabled="purchasing || !priceOptions.length || loadingQuote" :placeholder="priceSelectionPlaceholder" style="width: 100%" @change="selectPrice">
+              <el-option v-for="priceQuote in priceOptions" :key="priceQuote.key" :label="priceOptionLabel(priceQuote)" :value="priceQuote.key"><span class="select-option-main">{{ priceOptionLabel(priceQuote) }}</span><small>{{ priceQuote.available }} 个可用</small></el-option>
             </el-select>
             <p v-if="form.provider === 'smsbower'" class="form-help">
               Bronze、Silver、Gold 等级已包含在价格选项中，可用数量随价格档位变化。
             </p>
-            <p v-else-if="form.provider === 'herosms'" class="form-help">
+            <p v-else-if="form.provider === 'herosms' && !isHeroBidMode" class="form-help">
               仅显示当前 HeroSMS 账号有权限购买且仍有库存的报价档位，请按需选择。
             </p>
             <p v-else-if="form.provider === 'smspin'" class="form-help">
@@ -1196,10 +1335,10 @@ onBeforeUnmount(() => {
               size="large"
               :icon="ShoppingCart"
               :loading="purchasing"
-              :disabled="!selectedProviderPurchasable || !selectedPriceOption || selectedPriceOption.available < 1"
+              :disabled="!selectedProviderPurchasable || !selectedPriceOption || selectedPriceOption.available < 1 || (isHeroBidMode && !heroBidOption)"
               @click="purchase"
             >
-              购买号码
+              {{ isHeroBidMode && heroBidOption ? `以 ${formatMoney(heroBidOption.price, 'USD')} 购买` : '购买号码' }}
             </el-button>
           </div>
         </el-form>

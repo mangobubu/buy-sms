@@ -65,6 +65,7 @@ export interface PurchaseSignatureFields {
   duration?: string
   operator?: number
   maxPrice: string
+  priceMode?: 'fixed' | 'bid'
 }
 
 export function createPurchaseSignature(fields: PurchaseSignatureFields): string {
@@ -78,6 +79,7 @@ export function createPurchaseSignature(fields: PurchaseSignatureFields): string
       ? fields.operator
       : undefined,
     maxPrice: fields.maxPrice.trim(),
+    priceMode: fields.priceMode === 'bid' ? 'bid' : undefined,
   })
 }
 
@@ -105,6 +107,7 @@ export function normalizePurchaseSignature(signature: string): string {
         ? parsed.operator
         : undefined,
       maxPrice: parsed.maxPrice,
+      priceMode: parsed.priceMode === 'bid' ? 'bid' : parsed.priceMode === 'fixed' ? 'fixed' : undefined,
     })
   } catch {
     return signature

@@ -136,6 +136,7 @@ type PurchaseRequest struct {
 	Pool           string
 	Operator       string
 	Duration       string
+	PriceMode      string
 	ResellerUserID string
 	Extra          map[string]string
 }

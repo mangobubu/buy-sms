@@ -176,6 +176,7 @@ export interface PurchasePayload {
   duration?: string
   operator?: number
   maxPrice: string
+  priceMode?: 'fixed' | 'bid'
 }
 
 export type PurchaseAttemptStatus = 'provisioning' | 'succeeded' | 'failed' | 'unknown'
@@ -189,6 +190,7 @@ export interface PurchaseAttempt {
   tier?: SmsBowerTier
   duration?: string
   maxPrice: string
+  priceMode?: 'fixed' | 'bid'
   status: PurchaseAttemptStatus | string
   errorCode: string
   message: string

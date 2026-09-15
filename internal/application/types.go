@@ -88,6 +88,7 @@ type PurchaseInput struct {
 	QualityTier    string `json:"tier"`
 	Duration       string `json:"duration"`
 	MaxPrice       string `json:"maxPrice"`
+	PriceMode      string `json:"priceMode"`
 	IdempotencyKey string `json:"-"`
 }
 
@@ -100,6 +101,7 @@ type PurchaseAttemptDTO struct {
 	QualityTier string    `json:"tier,omitempty"`
 	Duration    string    `json:"duration,omitempty"`
 	MaxPrice    string    `json:"maxPrice"`
+	PriceMode   string    `json:"priceMode"`
 	Status      string    `json:"status"`
 	ErrorCode   string    `json:"errorCode"`
 	Message     string    `json:"message"`

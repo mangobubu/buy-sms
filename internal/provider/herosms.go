@@ -471,7 +471,7 @@ func (c *HeroSMS) Purchase(ctx context.Context, apiKey string, request PurchaseR
 		return PurchaseResult{}, ErrInvalidRequest
 	}
 	if request.MaxPrice != nil && request.FixedPrice == nil {
-		fixedPrice := true
+		fixedPrice := request.PriceMode != "bid"
 		request.FixedPrice = &fixedPrice
 	}
 	duration, err := normalizeRentalDuration(request.Duration)

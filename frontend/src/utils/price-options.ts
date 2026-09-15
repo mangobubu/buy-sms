@@ -39,7 +39,7 @@ export function displayQuotePriceOptions(quote: Quote): DisplayPriceOption[] {
 }
 
 export function purchasePayloadForOption(
-  conditions: { provider: ProviderCode; countryCode: string; serviceCode: string; tier?: SmsBowerTier | ''; duration?: string },
+  conditions: { provider: ProviderCode; countryCode: string; serviceCode: string; tier?: SmsBowerTier | ''; duration?: string; priceMode?: 'fixed' | 'bid' },
   option: DisplayPriceOption,
 ): PurchasePayload {
   return {
@@ -50,5 +50,6 @@ export function purchasePayloadForOption(
     ...(conditions.duration ? { duration: conditions.duration } : {}),
     ...(validOperator(option.operator) ? { operator: option.operator } : {}),
     maxPrice: option.price.trim(),
+    ...(conditions.priceMode === 'bid' ? { priceMode: 'bid' } : {}),
   }
 }

@@ -1519,6 +1519,74 @@ code {
   white-space: nowrap;
 }
 
+.hero-price-panel {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hero-price-tabs {
+  display: flex;
+  padding: 3px;
+  gap: 4px;
+  background: #f5f6f8;
+  border-radius: 999px;
+}
+
+.hero-price-tabs button {
+  flex: 1;
+  padding: 8px 14px;
+  color: #667085;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.hero-price-tabs button.active {
+  color: #1d2939;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(16, 24, 40, 0.12);
+}
+
+.hero-price-tabs button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.hero-bid-hint,
+.hero-bid-stock,
+.hero-bid-average {
+  margin: 0;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.hero-bid-hint {
+  color: #344054;
+  font-weight: 600;
+}
+
+.hero-bid-stock {
+  color: #344054;
+  font-size: 12px;
+}
+
+.hero-bid-average {
+  color: #667085;
+}
+
+.hero-bid-range {
+  display: flex;
+  justify-content: space-between;
+  color: #101828;
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .phone-cell small {
   margin-top: 3px;
   color: #9aa3b2;

@@ -782,12 +782,31 @@ func normalizeQualityTier(providerID, tier string) (string, error) {
 	}
 }
 
+func normalizePriceMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "fixed", nil
+	}
+	if mode != "fixed" && mode != "bid" {
+		return "", ErrBadRequest
+	}
+	return mode, nil
+}
+
 func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.User, ip string) (OrderDTO, error) {
 	pid := domain.NormalizeProvider(in.Provider)
 	in.CountryCode = strings.TrimSpace(in.CountryCode)
 	in.ServiceCode = strings.TrimSpace(in.ServiceCode)
 	in.Duration = strings.TrimSpace(in.Duration)
+	priceMode, modeErr := normalizePriceMode(in.PriceMode)
+	if modeErr != nil {
+		return OrderDTO{}, modeErr
+	}
+	in.PriceMode = priceMode
 	if pid == "" || in.CountryCode == "" || in.ServiceCode == "" {
+		return OrderDTO{}, ErrBadRequest
+	}
+	if in.PriceMode == "bid" && (pid != domain.ProviderHeroSMS || in.Duration != "") {
 		return OrderDTO{}, ErrBadRequest
 	}
 	if in.Operator < 0 || in.Operator > 2147483647 || (in.Operator != 0 && pid != domain.ProviderSMSPin) {
@@ -805,12 +824,16 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if err != nil || max <= 0 || max > 1_000_000 || math.IsNaN(max) || math.IsInf(max, 0) || len(in.IdempotencyKey) < 16 || len(in.IdempotencyKey) > 128 {
 		return OrderDTO{}, ErrBadRequest
 	}
-	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, Operator: in.Operator, MaxPrice: max})
+	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, PriceMode: in.PriceMode, Operator: in.Operator, MaxPrice: max})
 	if err != nil {
 		return OrderDTO{}, err
 	}
 	if !created {
-		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || record.Duration != in.Duration || record.Operator != in.Operator || math.Abs(record.MaxPrice-max) > .000001 {
+		recordPriceMode := strings.ToLower(strings.TrimSpace(record.PriceMode))
+		if recordPriceMode == "" {
+			recordPriceMode = "fixed"
+		}
+		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || record.Duration != in.Duration || recordPriceMode != in.PriceMode || record.Operator != in.Operator || math.Abs(record.MaxPrice-max) > .000001 {
 			return OrderDTO{}, purchaseError("idempotency_mismatch", nil)
 		}
 		if record.Status == "succeeded" && record.OrderID != "" {
@@ -927,7 +950,12 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		purchasePrice = selected.Price
 	}
 	purchaseStartedAt := s.now()
-	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: &purchasePrice, Operator: purchaseOperator})
+	var fixedPrice *bool
+	if pid == domain.ProviderHeroSMS {
+		fixed := in.PriceMode != "bid"
+		fixedPrice = &fixed
+	}
+	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: &purchasePrice, FixedPrice: fixedPrice, PriceMode: in.PriceMode, Operator: purchaseOperator})
 	s.invalidateProviderBalance(pid)
 	if err != nil {
 		status, code := classifyProviderPurchaseError(err)
@@ -1156,12 +1184,18 @@ func (s *Service) PurchaseAttempts(ctx context.Context, user domain.User) ([]Pur
 			ServiceName: record.ServiceName,
 			QualityTier: record.QualityTier,
 			Duration:    record.Duration,
-			MaxPrice:    strconv.FormatFloat(record.MaxPrice, 'f', -1, 64),
-			Status:      record.Status,
-			ErrorCode:   purchaseAttemptErrorCode(record.Status, record.ErrorCode),
-			Message:     purchaseAttemptMessage(record.Status, record.ErrorCode),
-			CreatedAt:   record.CreatedAt,
-			UpdatedAt:   record.UpdatedAt,
+			PriceMode: func() string {
+				if strings.TrimSpace(record.PriceMode) == "" {
+					return "fixed"
+				}
+				return record.PriceMode
+			}(),
+			MaxPrice:  strconv.FormatFloat(record.MaxPrice, 'f', -1, 64),
+			Status:    record.Status,
+			ErrorCode: purchaseAttemptErrorCode(record.Status, record.ErrorCode),
+			Message:   purchaseAttemptMessage(record.Status, record.ErrorCode),
+			CreatedAt: record.CreatedAt,
+			UpdatedAt: record.UpdatedAt,
 		})
 	}
 	return attempts, nil
