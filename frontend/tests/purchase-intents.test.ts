@@ -12,10 +12,65 @@ import {
   type PurchaseIntentStorage,
 } from '../src/utils/purchase-intents.ts'
 import { formatMoney, formatPurchaseDuration } from '../src/utils/format.ts'
+import { displayQuotePriceOptions, priceOptionKey, purchasePayloadForOption } from '../src/utils/price-options.ts'
 
 test('金额格式保留 HeroSMS 的四位报价精度', () => {
   assert.match(formatMoney('0.0957', 'USD'), /0\.0957/)
   assert.match(formatMoney('1', 'USD'), /1\.00$/)
+})
+
+test('SMSPin 同价运营商报价使用独立键并保留运营商编号', () => {
+  const options = displayQuotePriceOptions({
+    provider: 'smspin',
+    providerName: 'SMSPin',
+    countryCode: '84',
+    serviceCode: 'momo',
+    price: '0.18',
+    currency: 'USD',
+    available: 10,
+    priceOptions: [
+      { price: '0.18', available: 3, operator: 758, label: 'Operator 758' },
+      { price: '0.18', available: 7, operator: 1, label: 'Operator 1' },
+    ],
+  })
+
+  assert.deepEqual(options.map(({ key, operator, label }) => ({ key, operator, label })), [
+    { key: 'standard:0.18:operator:758', operator: 758, label: 'Operator 758' },
+    { key: 'standard:0.18:operator:1', operator: 1, label: 'Operator 1' },
+  ])
+  assert.notEqual(options[0]?.key, options[1]?.key)
+  assert.equal(priceOptionKey(undefined, '0.18', 758), 'standard:0.18:operator:758')
+})
+
+test('SMSPin 购买请求携带所选运营商，缺少有效运营商的报价不入选', () => {
+  const options = displayQuotePriceOptions({
+    provider: 'smspin',
+    providerName: 'SMSPin',
+    countryCode: '84',
+    serviceCode: 'momo',
+    price: '0.18',
+    currency: 'USD',
+    available: 10,
+    priceOptions: [
+      { price: '0.18', available: 10 },
+      { price: '0.20', available: 2, operator: 6, label: 'Operator 6' },
+    ],
+  })
+
+  assert.equal(options.length, 1)
+  assert.deepEqual(
+    purchasePayloadForOption(
+      { provider: 'smspin', countryCode: '84', serviceCode: 'momo' },
+      options[0]!,
+    ),
+    {
+      provider: 'smspin',
+      countryCode: '84',
+      serviceCode: 'momo',
+      operator: 6,
+      maxPrice: '0.20',
+    },
+  )
 })
 
 test('HeroSMS 订单时长按标准接码、小时和天展示', () => {
@@ -174,6 +229,40 @@ test('默认时长保持历史签名兼容，自定义时长使用独立幂等�
   assert.notEqual(defaultSignature, oneDaySignature)
   assert.notEqual(oneDaySignature, threeDaySignature)
   assert.match(oneDaySignature, /"duration":"24"/)
+})
+
+test('运营商编号纳入购买签名且空值保持旧签名兼容', () => {
+  const withoutOperator = createPurchaseSignature({
+    provider: 'smspin',
+    serviceCode: 'momo',
+    countryCode: '84',
+    maxPrice: '0.18',
+  })
+  const operator758 = createPurchaseSignature({
+    provider: 'smspin',
+    serviceCode: 'momo',
+    countryCode: '84',
+    operator: 758,
+    maxPrice: '0.18',
+  })
+  const operator1 = createPurchaseSignature({
+    provider: 'smspin',
+    serviceCode: 'momo',
+    countryCode: '84',
+    operator: 1,
+    maxPrice: '0.18',
+  })
+
+  assert.notEqual(withoutOperator, operator758)
+  assert.notEqual(operator758, operator1)
+  assert.equal(normalizePurchaseSignature(withoutOperator), withoutOperator)
+  assert.deepEqual(JSON.parse(operator758), {
+    provider: 'smspin',
+    serviceCode: 'momo',
+    countryCode: '84',
+    operator: 758,
+    maxPrice: '0.18',
+  })
 })
 
 test('签名会规范化时长空白且保留非空动态时长', () => {

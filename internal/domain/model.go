@@ -69,6 +69,8 @@ type CatalogItem struct {
 type CatalogPriceOption struct {
 	Price     float64 `json:"price"`
 	Available int     `json:"available"`
+	Operator  int     `json:"operator,omitempty"`
+	Label     string  `json:"label,omitempty"`
 }
 
 type Order struct {

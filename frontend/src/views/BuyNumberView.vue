@@ -22,6 +22,7 @@ import type {
   SmsBowerTier,
 } from '@/types/api'
 import { formatMoney, providerName } from '@/utils/format'
+import { displayQuotePriceOptions, priceOptionKey, purchasePayloadForOption, type DisplayPriceOption } from '@/utils/price-options'
 import {
   clearPurchaseIntent,
   createPurchaseIntentStore,
@@ -94,6 +95,7 @@ const form = reactive({
   tier: '' as SmsBowerTier | '',
   countryCode: '',
   duration: '',
+  operator: undefined as number | undefined,
   priceSelection: '',
   maxPrice: '',
 })
@@ -153,19 +155,12 @@ function selectPurchasableProvider(): void {
   const nextProvider = preferredProvider || purchasableProviders.value[0]
   if (nextProvider) form.provider = nextProvider.code
 }
-interface DisplayPriceOption {
-  key: string
-  price: string
-  available: number
-  currency: string
-  tier?: SmsBowerTier
-}
-
 interface ProviderSelection {
   serviceCode: string
   tier: SmsBowerTier | ''
   countryCode: string
   duration: string
+  operator?: number
   priceSelection: string
   maxPrice: string
 }
@@ -180,10 +175,6 @@ const providerCodes: ProviderCode[] = ['herosms', 'smsbower', 'smspool', 'smspin
 const providerSelections: Partial<Record<ProviderCode, ProviderSelection>> = {}
 let persistedProviderPreference: ProviderCode | '' = ''
 const DEFAULT_DURATION_SELECTION = 'duration:default'
-
-function priceOptionKey(tier: SmsBowerTier | undefined, price: string): string {
-  return `${tier || 'standard'}:${price}`
-}
 
 const selectedDurationOption = computed(() =>
   durationOptions.value.find((option) => option.value === form.duration),
@@ -218,20 +209,7 @@ const priceOptions = computed<DisplayPriceOption[]>(() => {
       (option) => Number.isFinite(Number(option.price)) && Number(option.price) > 0 && option.available > 0,
     )
   }
-  return quotes.value.flatMap((currentQuote) => {
-    const options = currentQuote.priceOptions?.length
-      ? currentQuote.priceOptions
-      : [{ price: currentQuote.price, available: currentQuote.available }]
-    return options
-      .filter((option) => Number.isFinite(Number(option.price)) && Number(option.price) > 0 && option.available > 0)
-      .sort((left, right) => Number(left.price) - Number(right.price))
-      .map<DisplayPriceOption>((option) => ({
-        ...option,
-        key: priceOptionKey(currentQuote.tier, option.price),
-        currency: currentQuote.currency || 'USD',
-        tier: currentQuote.tier,
-      }))
-  })
+  return quotes.value.flatMap(displayQuotePriceOptions)
 })
 const selectedPriceOption = computed(() =>
   priceOptions.value.find((option) => option.key === form.priceSelection),
@@ -250,7 +228,9 @@ function smsBowerTierLabel(tier?: SmsBowerTier): string {
 
 function priceOptionLabel(option: DisplayPriceOption): string {
   const price = formatMoney(option.price, option.currency)
-  return option.tier ? `${smsBowerTierLabel(option.tier)} · ${price}` : price
+  const tier = option.tier ? smsBowerTierLabel(option.tier) : ''
+  const operator = option.label || (option.operator !== undefined ? `Operator ${option.operator}` : '')
+  return [tier, operator, price].filter(Boolean).join(' · ')
 }
 
 function durationOptionLabel(option: DurationOption): string {
@@ -271,6 +251,7 @@ function snapshotSelection(): ProviderSelection {
     tier: form.tier,
     countryCode: form.countryCode,
     duration: form.provider === 'herosms' ? form.duration : '',
+    operator: form.operator,
     priceSelection: form.priceSelection,
     maxPrice: form.maxPrice,
   }
@@ -353,6 +334,7 @@ function saveCurrentSelection(provider = form.provider): void {
 function clearPriceSelection(): void {
   priceLoadFailed.value = false
   form.tier = ''
+  form.operator = undefined
   form.priceSelection = ''
   form.maxPrice = ''
   quotes.value = []
@@ -360,6 +342,7 @@ function clearPriceSelection(): void {
 
 function resetSelectedPrice(): void {
   form.tier = ''
+  form.operator = undefined
   form.priceSelection = ''
   form.maxPrice = ''
 }
@@ -368,6 +351,7 @@ function selectPrice(selection: string): void {
   form.priceSelection = selection
   const option = priceOptions.value.find((item) => item.key === selection)
   form.tier = option?.tier || ''
+  form.operator = option?.operator
   form.maxPrice = option?.price || ''
   saveCurrentSelection()
 }
@@ -759,6 +743,7 @@ watch(
     form.tier = ''
     form.countryCode = ''
     form.duration = ''
+    form.operator = undefined
     form.priceSelection = ''
     form.maxPrice = ''
     services.value = []
@@ -848,6 +833,7 @@ interface PurchaseConditionSnapshot {
   countryCode: string
   duration: string
   durationLabel: string
+  operator?: number
   maxPrice: string
 }
 
@@ -880,6 +866,7 @@ function purchaseConditionsStillSelected(conditions: PurchaseConditionSnapshot):
     form.serviceCode === conditions.serviceCode &&
     form.tier === conditions.tier &&
     form.countryCode === conditions.countryCode &&
+    form.operator === conditions.operator &&
     (form.provider === 'herosms' ? form.duration : '') === conditions.duration &&
     form.maxPrice.trim() === conditions.maxPrice
   )
@@ -900,6 +887,7 @@ async function confirmPurchaseRetryUnlock(
     conditions.countryCode +
     '；号码等级：' +
     (conditions.tier || '默认') +
+    (conditions.operator ? '；运营商：Operator ' + conditions.operator : '') +
     (conditions.provider === 'herosms'
       ? '；购买时长：' + conditions.durationLabel
       : '') +
@@ -937,6 +925,8 @@ async function purchase(): Promise<void> {
   try {
     if (!formRef.value || !(await formRef.value.validate().catch(() => false))) return
     if (!form.provider) return
+    const requestOption = selectedPriceOption.value
+    if (!requestOption) return
 
     requestStorageKey = purchaseIntentStorageKey()
     if (!requestStorageKey) {
@@ -949,6 +939,7 @@ async function purchase(): Promise<void> {
       tier: form.tier,
       countryCode: form.countryCode,
       duration: form.provider === 'herosms' ? form.duration : '',
+      operator: form.operator,
       durationLabel: form.provider === 'herosms' && selectedDurationOption.value
         ? durationOptionLabel(selectedDurationOption.value)
         : '标准接码',
@@ -961,17 +952,7 @@ async function purchase(): Promise<void> {
       requestSignature,
       purchaseIntentLockManager,
     )
-    await ordersApi.create(
-      {
-        provider: requestConditions.provider,
-        countryCode: requestConditions.countryCode,
-        serviceCode: requestConditions.serviceCode,
-        ...(requestConditions.tier ? { tier: requestConditions.tier } : {}),
-        ...(requestConditions.duration ? { duration: requestConditions.duration } : {}),
-        maxPrice: requestConditions.maxPrice,
-      },
-      requestKey,
-    )
+    await ordersApi.create(purchasePayloadForOption(requestConditions, requestOption), requestKey)
     await clearPurchaseIntent(
       purchaseIntentStore,
       requestStorageKey,
@@ -1200,6 +1181,9 @@ onBeforeUnmount(() => {
             </p>
             <p v-else-if="form.provider === 'herosms'" class="form-help">
               仅显示当前 HeroSMS 账号有权限购买且仍有库存的报价档位，请按需选择。
+            </p>
+            <p v-else-if="form.provider === 'smspin'" class="form-help">
+              SMSPin 按运营商选择价格和库存，购买前会复核所选报价；供应商不支持原子锁价，最终以实际订单价格为准。
             </p>
             <p v-else class="form-help">请选择要购买的价格，可用数量随价格档位变化。</p>
           </el-form-item>

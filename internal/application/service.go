@@ -675,6 +675,8 @@ func quotePriceOptions(item domain.CatalogItem, fallbackPrice string, fallbackSt
 		options = append(options, QuotePriceOptionDTO{
 			Price:     strconv.FormatFloat(option.Price, 'f', -1, 64),
 			Available: option.Available,
+			Operator:  option.Operator,
+			Label:     option.Label,
 		})
 	}
 	if len(options) == 0 {
@@ -788,6 +790,9 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if pid == "" || in.CountryCode == "" || in.ServiceCode == "" {
 		return OrderDTO{}, ErrBadRequest
 	}
+	if in.Operator < 0 || in.Operator > 2147483647 || (in.Operator != 0 && pid != domain.ProviderSMSPin) {
+		return OrderDTO{}, ErrBadRequest
+	}
 	if err := validatePurchaseDuration(pid, in.Duration); err != nil {
 		return OrderDTO{}, err
 	}
@@ -800,12 +805,12 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 	if err != nil || max <= 0 || max > 1_000_000 || math.IsNaN(max) || math.IsInf(max, 0) || len(in.IdempotencyKey) < 16 || len(in.IdempotencyKey) > 128 {
 		return OrderDTO{}, ErrBadRequest
 	}
-	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: max})
+	record, created, err := s.repo.ReservePurchase(ctx, store.PurchaseRecord{ID: identity.UUID(), UserID: user.ID, IdempotencyKey: in.IdempotencyKey, ProviderID: pid, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, Operator: in.Operator, MaxPrice: max})
 	if err != nil {
 		return OrderDTO{}, err
 	}
 	if !created {
-		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || record.Duration != in.Duration || math.Abs(record.MaxPrice-max) > .000001 {
+		if record.ProviderID != pid || record.CountryCode != in.CountryCode || record.ServiceCode != in.ServiceCode || record.QualityTier != in.QualityTier || record.Duration != in.Duration || record.Operator != in.Operator || math.Abs(record.MaxPrice-max) > .000001 {
 			return OrderDTO{}, purchaseError("idempotency_mismatch", nil)
 		}
 		if record.Status == "succeeded" && record.OrderID != "" {
@@ -844,6 +849,52 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		return OrderDTO{}, purchaseError("provider_disabled", nil)
 	}
 	purchasePrice := max
+	purchaseOperator := ""
+	if pid == domain.ProviderSMSPin {
+		// Reject missing or already-overprice routes before POST. SMSPin does
+		// not support an atomic cap, so the returned cost is checked separately.
+		items, preflightErr := client.Catalog(ctx, key, provider.CatalogRequest{Kind: provider.CatalogPrice, Country: in.CountryCode, Service: in.ServiceCode})
+		if preflightErr != nil {
+			status, code := classifyProviderPurchaseError(preflightErr)
+			if status == "unknown" {
+				// No order POST has happened yet, so a catalogue transport or
+				// upstream 5xx is a definite preflight failure.
+				status, code = "failed", "provider_preflight_error"
+			}
+			s.failPurchase(record.ID, status, code)
+			return OrderDTO{}, purchaseError(code, preflightErr)
+		}
+		var selected *domain.CatalogPriceOption
+		for i := range items {
+			if items[i].Code != in.ServiceCode || (items[i].Country != "" && !strings.EqualFold(items[i].Country, in.CountryCode)) {
+				continue
+			}
+			if len(items[i].PriceOptions) > 0 {
+				for j := range items[i].PriceOptions {
+					op := &items[i].PriceOptions[j]
+					if in.Operator == 0 || op.Operator == in.Operator {
+						selected = op
+						break
+					}
+				}
+			}
+			if selected != nil {
+				break
+			}
+		}
+		if selected == nil || selected.Available <= 0 {
+			s.failPurchase(record.ID, "failed", "no_numbers")
+			return OrderDTO{}, purchaseError("no_numbers", nil)
+		}
+		if selected.Price > max+0.000001 {
+			s.failPurchase(record.ID, "failed", "price_exceeded")
+			return OrderDTO{}, purchaseError("price_exceeded", nil)
+		}
+		purchasePrice = selected.Price
+		if selected.Operator > 0 {
+			purchaseOperator = strconv.Itoa(selected.Operator)
+		}
+	}
 	if in.Duration != "" {
 		rentalClient, ok := client.(provider.RentalDurationCatalogClient)
 		if !ok {
@@ -876,7 +927,7 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		purchasePrice = selected.Price
 	}
 	purchaseStartedAt := s.now()
-	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: &purchasePrice})
+	result, err := client.Purchase(ctx, key, provider.PurchaseRequest{Country: in.CountryCode, Service: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, MaxPrice: &purchasePrice, Operator: purchaseOperator})
 	s.invalidateProviderBalance(pid)
 	if err != nil {
 		status, code := classifyProviderPurchaseError(err)
@@ -893,7 +944,27 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		// serviceCountRent 实时校验并锁定的租价，避免长租订单金额记为零。
 		result.Cost = purchasePrice
 	}
+	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt, CreatedAt: purchaseStartedAt}
+	if o.Currency == "" {
+		o.Currency = "USD"
+	}
 	if result.Cost > purchasePrice+0.000001 {
+		if pid == domain.ProviderSMSPin {
+			// The POST already created this upstream order. SMSPin has no cancel
+			// API: keep the overprice error and retry lock, never report cancellation
+			// or success. Save the returned number for polling/reconciliation only.
+			if recorder, ok := s.repo.(store.UnconfirmedPurchaseRepository); ok {
+				saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if saveErr := recorder.SaveUnconfirmedPurchase(saveCtx, record.ID, o, "price_cancel_unknown"); saveErr != nil {
+					s.failPurchase(record.ID, "unknown", "database_error")
+					return OrderDTO{}, purchaseResultUnknownError("database_error", saveErr)
+				}
+			} else {
+				s.failPurchase(record.ID, "unknown", "price_cancel_unknown")
+			}
+			return OrderDTO{}, purchaseResultUnknownError("price_cancel_unknown", nil)
+		}
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if cancelErr := cancelProviderOrder(cancelCtx, client, key, result.UpstreamID, in.Duration); cancelErr != nil {
@@ -904,11 +975,21 @@ func (s *Service) Purchase(ctx context.Context, in PurchaseInput, user domain.Us
 		s.failPurchase(record.ID, "failed", "price_exceeded")
 		return OrderDTO{}, purchaseError("price_exceeded", nil)
 	}
-	o := domain.Order{ID: identity.UUID(), UserID: user.ID, ProviderID: pid, UpstreamID: result.UpstreamID, PhoneNumber: result.PhoneNumber, CountryCode: in.CountryCode, ServiceCode: in.ServiceCode, QualityTier: in.QualityTier, Duration: in.Duration, Status: domain.OrderActive, Cost: result.Cost, Currency: result.Currency, CanGetAnotherSMS: result.CanGetAnotherSMS, NextPollAt: s.now(), ExpiresAt: result.ExpiresAt, CreatedAt: purchaseStartedAt}
-	if o.Currency == "" {
-		o.Currency = "USD"
-	}
 	if err = s.repo.CompletePurchase(ctx, record.ID, o); err != nil {
+		if pid == domain.ProviderSMSPin {
+			// SMSPin has no cancel endpoint. CompletePurchase rolls back its
+			// transaction on failure, so retry once through the unconfirmed path
+			// to keep the returned order available for polling/reconciliation.
+			if recorder, ok := s.repo.(store.UnconfirmedPurchaseRepository); ok {
+				saveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if saveErr := recorder.SaveUnconfirmedPurchase(saveCtx, record.ID, o, "database_error"); saveErr == nil {
+					return OrderDTO{}, purchaseError("database_error", mapStore(err))
+				}
+			}
+			s.failPurchase(record.ID, "unknown", "database_error")
+			return OrderDTO{}, purchaseError("database_error", mapStore(err))
+		}
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if cancelErr := cancelProviderOrder(cancelCtx, client, key, result.UpstreamID, in.Duration); cancelErr == nil {

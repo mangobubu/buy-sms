@@ -63,6 +63,7 @@ export interface PurchaseSignatureFields {
   tier?: string
   countryCode: string
   duration?: string
+  operator?: number
   maxPrice: string
 }
 
@@ -73,6 +74,9 @@ export function createPurchaseSignature(fields: PurchaseSignatureFields): string
     tier: fields.tier || undefined,
     countryCode: fields.countryCode,
     duration: fields.duration?.trim() || undefined,
+    operator: typeof fields.operator === 'number' && Number.isInteger(fields.operator) && fields.operator > 0
+      ? fields.operator
+      : undefined,
     maxPrice: fields.maxPrice.trim(),
   })
 }
@@ -97,6 +101,9 @@ export function normalizePurchaseSignature(signature: string): string {
       tier: typeof parsed.tier === 'string' ? parsed.tier : undefined,
       countryCode: parsed.countryCode,
       duration: typeof parsed.duration === 'string' ? parsed.duration : undefined,
+      operator: typeof parsed.operator === 'number' && Number.isInteger(parsed.operator) && parsed.operator > 0
+        ? parsed.operator
+        : undefined,
       maxPrice: parsed.maxPrice,
     })
   } catch {

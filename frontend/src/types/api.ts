@@ -130,6 +130,8 @@ export interface Quote {
   priceOptions?: Array<{
     price: string
     available: number
+    operator?: number
+    label?: string
   }>
 }
 
@@ -172,6 +174,7 @@ export interface PurchasePayload {
   serviceCode: string
   tier?: SmsBowerTier
   duration?: string
+  operator?: number
   maxPrice: string
 }
 

@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
     quality_tier text NOT NULL DEFAULT '',
     duration text NOT NULL DEFAULT '',
     max_price numeric(18,6) NOT NULL,
+    operator integer NOT NULL DEFAULT 0,
     status text NOT NULL CHECK(status IN ('provisioning','succeeded','unknown','failed')),
     order_id uuid REFERENCES orders(id),
     error_code text NOT NULL DEFAULT '',
@@ -247,6 +248,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
 );
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS quality_tier text NOT NULL DEFAULT '';
 ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS duration text NOT NULL DEFAULT '';
+ALTER TABLE purchase_requests ADD COLUMN IF NOT EXISTS operator integer NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS purchase_requests_user_created ON purchase_requests(user_id, created_at DESC);
 DO $$
 BEGIN

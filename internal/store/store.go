@@ -77,6 +77,12 @@ type Repository interface {
 	Close()
 }
 
+// UnconfirmedPurchaseRepository saves an already-created upstream order while
+// retaining an unknown purchase request, so retries remain blocked.
+type UnconfirmedPurchaseRepository interface {
+	SaveUnconfirmedPurchase(context.Context, string, domain.Order, string) error
+}
+
 // PersonalUsedRepository persists the private used/unused marker and supports
 // filtering orders by that marker. It is optional so lightweight repositories
 // used by lifecycle tests remain compatible.
@@ -96,6 +102,7 @@ type RenewalRecord struct {
 type PurchaseRecord struct {
 	ID, UserID, IdempotencyKey, ProviderID, CountryCode, CountryName, ServiceCode, ServiceName, QualityTier, Duration, Status, OrderID, ErrorCode string
 	MaxPrice                                                                                                                                      float64
+	Operator                                                                                                                                      int
 	CreatedAt, UpdatedAt                                                                                                                          time.Time
 }
 

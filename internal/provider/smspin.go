@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -119,12 +122,26 @@ func (c *SMSPin) Catalog(ctx context.Context, key string, req CatalogRequest) ([
 		}
 		return items, nil
 	case CatalogPrice:
+		// SMSPin exposes per-operator price/stock through /operators whenever a
+		// concrete country+service is requested. The aggregate /numbers route is
+		// retained only for non-directed catalogue refreshes.
 		query := make(url.Values)
 		if req.Country != "" {
 			query.Set("country", req.Country)
 		}
 		if req.Service != "" {
 			query.Set("service", req.Service)
+		}
+		if req.Country != "" && req.Service != "" {
+			payload, e := c.apiGet(ctx, "catalog.price", key, "operators", query)
+			if e != nil {
+				return nil, e
+			}
+			items, parseErr := c.parseOperatorsCatalog(payload, req)
+			if parseErr != nil {
+				return nil, c.http.failure("catalog.price", "INVALID_RESPONSE", 0, false, nil)
+			}
+			return items, nil
 		}
 		payload, e := c.apiGet(ctx, "catalog.price", key, "numbers", query)
 		if e != nil {
@@ -134,6 +151,119 @@ func (c *SMSPin) Catalog(ctx context.Context, key string, req CatalogRequest) ([
 	}
 	return nil, ErrUnsupportedKind
 }
+
+func (c *SMSPin) parseOperatorsCatalog(payload []byte, req CatalogRequest) ([]domain.CatalogItem, error) {
+	value, err := decodeAny(payload)
+	if err != nil {
+		return nil, err
+	}
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("operators response")
+	}
+	raw, found := lookup(obj, "operators")
+	if !found {
+		return nil, fmt.Errorf("operators response missing operators")
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("operators response operators type")
+	}
+	options := make([]domain.CatalogPriceOption, 0, len(list))
+	seen := make(map[int]int, len(list))
+	for _, entry := range list {
+		m, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		rawOperator, _ := lookup(m, "operator")
+		op, ok := smsPinPositiveInteger(rawOperator, 2147483647)
+		if !ok {
+			continue
+		}
+		price, ok := firstFloat(m, "price")
+		if !ok || price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
+			continue
+		}
+		rawAvailable, _ := lookup(m, "count")
+		available, ok := smsPinPositiveInteger(rawAvailable, int64(^uint(0)>>1))
+		if !ok {
+			continue
+		}
+		label := firstScalar(m, "label")
+		option := domain.CatalogPriceOption{Price: price, Available: available, Operator: op, Label: label}
+		if index, exists := seen[op]; exists {
+			// One operator id is one selectable route. Conflicting prices are
+			// ambiguous; repeated rows must not inflate that route's inventory.
+			if option.Price != options[index].Price {
+				return nil, fmt.Errorf("operator has conflicting prices")
+			}
+			if option.Available > options[index].Available {
+				options[index].Available = option.Available
+			}
+			if options[index].Label == "" {
+				options[index].Label = option.Label
+			}
+			continue
+		}
+		seen[op] = len(options)
+		options = append(options, option)
+	}
+	sort.Slice(options, func(i, j int) bool {
+		if options[i].Price == options[j].Price {
+			return options[i].Operator < options[j].Operator
+		}
+		return options[i].Price < options[j].Price
+	})
+	var price *float64
+	if len(options) > 0 {
+		value := options[0].Price
+		price = &value
+	}
+	stock := 0
+	for _, option := range options {
+		if option.Available <= int(^uint(0)>>1)-stock {
+			stock += option.Available
+		}
+	}
+	return []domain.CatalogItem{{ProviderID: domain.ProviderSMSPin, Kind: CatalogPrice, Code: req.Service, Country: req.Country, Name: req.Service, Price: price, Stock: &stock, PriceOptions: options, Raw: cloneRaw(payload)}}, nil
+}
+
+// smsPinPositiveInteger deliberately rejects decimal spellings such as
+// "2.0"; operator display ids and inventory counts are integer API fields.
+func smsPinPositiveInteger(value any, max int64) (int, bool) {
+	var number int64
+	switch typed := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(typed), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		number = parsed
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		number = parsed
+	case int:
+		number = int64(typed)
+	case int64:
+		number = typed
+	case float64:
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || math.Trunc(typed) != typed || typed > float64(max) {
+			return 0, false
+		}
+		number = int64(typed)
+	default:
+		return 0, false
+	}
+	if number <= 0 || number > max || number > int64(^uint(0)>>1) {
+		return 0, false
+	}
+	return int(number), true
+}
+
 func (c *SMSPin) parseNumbersCatalog(payload []byte, req CatalogRequest) ([]domain.CatalogItem, error) {
 	value, e := decodeAny(payload)
 	if e != nil {
@@ -203,8 +333,8 @@ func (c *SMSPin) Purchase(ctx context.Context, key string, req PurchaseRequest) 
 	}
 	body := map[string]any{"country": req.Country, "service": req.Service}
 	if strings.TrimSpace(req.Operator) != "" {
-		var op int
-		if _, e := fmt.Sscanf(req.Operator, "%d", &op); e != nil || op <= 0 {
+		op, e := strconv.Atoi(strings.TrimSpace(req.Operator))
+		if e != nil || op <= 0 || op > 2147483647 {
 			return PurchaseResult{}, ErrInvalidRequest
 		}
 		body["operator"] = op

@@ -84,6 +84,7 @@ type PurchaseInput struct {
 	Provider       string `json:"provider"`
 	CountryCode    string `json:"countryCode"`
 	ServiceCode    string `json:"serviceCode"`
+	Operator       int    `json:"operator,omitempty"`
 	QualityTier    string `json:"tier"`
 	Duration       string `json:"duration"`
 	MaxPrice       string `json:"maxPrice"`
@@ -139,6 +140,8 @@ type ServiceDTO struct {
 type QuotePriceOptionDTO struct {
 	Price     string `json:"price"`
 	Available int    `json:"available"`
+	Operator  int    `json:"operator,omitempty"`
+	Label     string `json:"label,omitempty"`
 }
 
 type QuoteDTO struct {

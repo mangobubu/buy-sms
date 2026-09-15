@@ -134,4 +134,4 @@ docker compose down
 - PostgreSQL 使用具名卷持久化，不依赖客户端缓存保存订单、号码、验证码或轮询状态。
 - 结束本地验证后应停止开发服务；Compose 验证结束可执行 `docker compose down`，数据库卷默认保留。
 
-SMSPin 使用 https://smspin.io/api/v1，通过 X-API-Key 认证；目录读取 /countries、/services、/numbers，下单使用 POST /orders，订单状态使用 GET /orders/{id} 轮询。SMSPin 不提供完成/取消写接口，号码按供应商到期策略自动结束。
+SMSPin 使用 https://smspin.io/api/v1，通过 X-API-Key 认证；目录读取 /countries、/services，实时价格读取 /operators（按国家、服务返回运营商价格与库存），无筛选时使用 /numbers 汇总目录；下单使用 POST /orders，可携带 operator 指定运营商，订单状态使用 GET /orders/{id} 轮询。SMSPin 不提供完成/取消写接口，号码按供应商到期策略自动结束。
