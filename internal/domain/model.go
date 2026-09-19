@@ -19,24 +19,39 @@ const (
 )
 
 type User struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	DisplayName  string     `json:"displayName,omitempty"`
-	PasswordHash string     `json:"-"`
-	Role         string     `json:"role"`
-	Active       bool       `json:"active"`
-	LastLoginAt  *time.Time `json:"lastLoginAt,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	TwoFactorEnabled      bool       `json:"twoFactorEnabled"`
+	TwoFactorSecretCipher []byte     `json:"-"`
+	TwoFactorLastStep     int64      `json:"-"`
+	AuthVersion           int64      `json:"-"`
+	ID                    string     `json:"id"`
+	Username              string     `json:"username"`
+	DisplayName           string     `json:"displayName,omitempty"`
+	PasswordHash          string     `json:"-"`
+	Role                  string     `json:"role"`
+	Active                bool       `json:"active"`
+	LastLoginAt           *time.Time `json:"lastLoginAt,omitempty"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	UpdatedAt             time.Time  `json:"updatedAt"`
+}
+
+type TwoFactorChallenge struct {
+	TokenHash      []byte
+	UserID         string
+	IP             string
+	AuthVersion    int64
+	LoginAttemptID int64
+	Attempts       int
+	ExpiresAt      time.Time
 }
 
 type Session struct {
-	ID        string
-	UserID    string
-	TokenHash []byte
-	IP        string
-	UserAgent string
-	ExpiresAt time.Time
+	AuthVersion int64
+	ID          string
+	UserID      string
+	TokenHash   []byte
+	IP          string
+	UserAgent   string
+	ExpiresAt   time.Time
 }
 
 type Provider struct {

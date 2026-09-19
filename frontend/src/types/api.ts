@@ -19,6 +19,7 @@ export interface AuthUser {
   username: string
   displayName?: string
   role: 'admin' | 'operator' | string
+  twoFactorEnabled: boolean
 }
 
 export interface CaptchaResponse {
@@ -38,6 +39,30 @@ export interface LoginResponse {
   token: string
   user: AuthUser
   expiresAt?: string
+}
+
+export interface TwoFactorChallenge {
+  twoFactorRequired: true
+  challengeToken: string
+  expiresAt: string
+}
+
+export type LoginResult = LoginResponse | TwoFactorChallenge
+
+export interface TwoFactorLoginPayload {
+  challengeToken: string
+  code: string
+  adminPath: string
+}
+
+export interface TwoFactorConfiguration {
+  secret: string
+  otpauthUrl: string
+}
+
+export interface TwoFactorSetup extends TwoFactorConfiguration {
+  setupToken: string
+  expiresAt: string
 }
 
 export interface DashboardOverview {
@@ -259,6 +284,7 @@ export interface SystemUser {
   username: string
   displayName?: string
   role: 'admin' | 'operator' | string
+  twoFactorEnabled: boolean
   enabled: boolean
   lastLoginAt?: string
   createdAt: string
@@ -270,4 +296,7 @@ export interface SaveUserPayload {
   role: string
   enabled: boolean
   password?: string
+  twoFactorEnabled?: boolean
+  twoFactorSetupToken?: string
+  twoFactorCode?: string
 }

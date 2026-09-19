@@ -16,6 +16,7 @@ import (
 
 	"buysms/internal/domain"
 	"buysms/internal/identity"
+	"buysms/internal/secure"
 	"buysms/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -27,6 +28,7 @@ var (
 )
 
 type Service struct {
+	vault                  *secure.Vault
 	repo                   store.Repository
 	pepper                 []byte
 	adminPath              string
@@ -50,14 +52,23 @@ type LoginInput struct {
 	UserAgent string `json:"-"`
 }
 type LoginResult struct {
-	Token     string      `json:"token"`
-	User      domain.User `json:"user"`
-	ExpiresAt time.Time   `json:"expiresAt"`
+	Token             string       `json:"token,omitempty"`
+	User              *domain.User `json:"user,omitempty"`
+	ExpiresAt         time.Time    `json:"expiresAt"`
+	TwoFactorRequired bool         `json:"twoFactorRequired,omitempty"`
+	ChallengeToken    string       `json:"challengeToken,omitempty"`
 }
 
-func New(repo store.Repository, pepper []byte, path string, captchaTTL, sessionTTL time.Duration) *Service {
-	return &Service{repo: repo, pepper: pepper, adminPath: strings.TrimRight(path, "/"), captchaTTL: captchaTTL, sessionTTL: sessionTTL, now: time.Now, captchaCode: randomCaptchaCode}
+func New(repo store.Repository, pepper []byte, path string, captchaTTL, sessionTTL time.Duration, vaults ...*secure.Vault) *Service {
+	s := &Service{repo: repo, pepper: pepper, adminPath: strings.TrimRight(path, "/"), captchaTTL: captchaTTL, sessionTTL: sessionTTL, now: time.Now, captchaCode: randomCaptchaCode}
+	if len(vaults) > 0 {
+		s.vault = vaults[0]
+	}
+	return s
 }
+
+// ConfigureVault is called while constructing the application, before serving requests.
+func (s *Service) ConfigureVault(vault *secure.Vault) { s.vault = vault }
 
 func (s *Service) Captcha(ctx context.Context) (Captcha, error) {
 	code, err := s.captchaCode()
@@ -161,16 +172,31 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (LoginResult, error)
 	if err != nil || !u.Active || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.Password)) != nil {
 		return LoginResult{}, ErrCredentials
 	}
+	if u.TwoFactorEnabled {
+		token := identity.Token(32)
+		exp := s.now().Add(5 * time.Minute)
+		challenge := domain.TwoFactorChallenge{TokenHash: s.digest("two-factor:" + token), UserID: u.ID, IP: in.IP, AuthVersion: u.AuthVersion, LoginAttemptID: attemptID, ExpiresAt: exp}
+		if err = s.repo.CreateTwoFactorChallenge(ctx, challenge); err != nil {
+			if errors.Is(err, store.ErrChallengeExpired) {
+				return LoginResult{}, ErrCredentials
+			}
+			return LoginResult{}, err
+		}
+		return LoginResult{TwoFactorRequired: true, ChallengeToken: token, ExpiresAt: exp}, nil
+	}
 	token := identity.Token(32)
 	exp := s.now().Add(s.sessionTTL)
-	sess := domain.Session{ID: identity.UUID(), UserID: u.ID, TokenHash: s.digest("session:" + token), IP: in.IP, UserAgent: truncate(in.UserAgent, 512), ExpiresAt: exp}
+	sess := domain.Session{AuthVersion: u.AuthVersion, ID: identity.UUID(), UserID: u.ID, TokenHash: s.digest("session:" + token), IP: in.IP, UserAgent: truncate(in.UserAgent, 512), ExpiresAt: exp}
 	if err = s.repo.CreateSession(ctx, sess); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return LoginResult{}, ErrCredentials
+		}
 		return LoginResult{}, err
 	}
 	_ = s.repo.CompleteLoginAttempt(ctx, attemptID, true)
 	_ = s.repo.Audit(ctx, &u.ID, "login", "user", u.ID, in.IP, nil)
 	_ = s.repo.TouchLastLogin(ctx, u.ID)
-	return LoginResult{Token: token, User: u, ExpiresAt: exp}, nil
+	return LoginResult{Token: token, User: &u, ExpiresAt: exp}, nil
 }
 
 func (s *Service) Authenticate(ctx context.Context, token string) (domain.User, error) {

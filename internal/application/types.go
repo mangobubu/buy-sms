@@ -209,20 +209,24 @@ type DashboardDTO struct {
 }
 
 type UserDTO struct {
-	ID          string     `json:"id"`
-	Username    string     `json:"username"`
-	DisplayName string     `json:"displayName,omitempty"`
-	Role        string     `json:"role"`
-	Enabled     bool       `json:"enabled"`
-	LastLoginAt *time.Time `json:"lastLoginAt,omitempty"`
-	CreatedAt   time.Time  `json:"createdAt"`
+	TwoFactorEnabled bool       `json:"twoFactorEnabled"`
+	ID               string     `json:"id"`
+	Username         string     `json:"username"`
+	DisplayName      string     `json:"displayName,omitempty"`
+	Role             string     `json:"role"`
+	Enabled          bool       `json:"enabled"`
+	LastLoginAt      *time.Time `json:"lastLoginAt,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 type SaveUserInput struct {
-	Username    string `json:"username"`
-	DisplayName string `json:"displayName"`
-	Role        string `json:"role"`
-	Enabled     bool   `json:"enabled"`
-	Password    string `json:"password"`
+	TwoFactorEnabled    *bool  `json:"twoFactorEnabled"`
+	TwoFactorSetupToken string `json:"twoFactorSetupToken"`
+	TwoFactorCode       string `json:"twoFactorCode"`
+	Username            string `json:"username"`
+	DisplayName         string `json:"displayName"`
+	Role                string `json:"role"`
+	Enabled             bool   `json:"enabled"`
+	Password            string `json:"password"`
 }
 
 func OrderView(o domain.Order, webhook bool, now time.Time) OrderDTO {
@@ -254,7 +258,7 @@ type LocalCompleteInput struct {
 }
 
 func UserView(u domain.User) UserDTO {
-	return UserDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Active, LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt}
+	return UserDTO{TwoFactorEnabled: u.TwoFactorEnabled, ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Active, LastLoginAt: u.LastLoginAt, CreatedAt: u.CreatedAt}
 }
 func providerName(id string) string {
 	switch id {

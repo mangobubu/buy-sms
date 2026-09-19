@@ -214,6 +214,9 @@ type accountingRecovery struct {
 }
 
 func New(repo store.Repository, authentication *auth.Service, vault *secure.Vault, cfg config.Config) *Service {
+	if authentication != nil && vault != nil {
+		authentication.ConfigureVault(vault)
+	}
 	return &Service{
 		repo: repo, auth: authentication, vault: vault, config: cfg,
 		afterMessage: make(chan domain.Order, 128), accountingRecovery: make(chan accountingRecovery, 128),
@@ -1769,6 +1772,9 @@ func (s *Service) Users(ctx context.Context) ([]UserDTO, error) {
 	return out, nil
 }
 func (s *Service) CreateUser(ctx context.Context, in SaveUserInput, actor domain.User, ip string) (UserDTO, error) {
+	if actor.Role != "admin" {
+		return UserDTO{}, ErrForbidden
+	}
 	if strings.TrimSpace(in.Username) == "" || !validRole(in.Role) || strings.TrimSpace(in.Password) == "" {
 		return UserDTO{}, ErrBadRequest
 	}
@@ -1777,6 +1783,9 @@ func (s *Service) CreateUser(ctx context.Context, in SaveUserInput, actor domain
 		return UserDTO{}, fmt.Errorf("%w: %v", ErrBadRequest, err)
 	}
 	u := domain.User{ID: identity.UUID(), Username: strings.TrimSpace(in.Username), DisplayName: strings.TrimSpace(in.DisplayName), PasswordHash: hash, Role: in.Role, Active: in.Enabled}
+	if err = s.prepareTwoFactor(&u, "", in, actor); err != nil {
+		return UserDTO{}, err
+	}
 	if err = s.repo.CreateUser(ctx, u); err != nil {
 		return UserDTO{}, mapStore(err)
 	}
@@ -1785,6 +1794,9 @@ func (s *Service) CreateUser(ctx context.Context, in SaveUserInput, actor domain
 	return UserView(u), err
 }
 func (s *Service) UpdateUser(ctx context.Context, id string, in SaveUserInput, actor domain.User, ip string) (UserDTO, error) {
+	if actor.Role != "admin" {
+		return UserDTO{}, ErrForbidden
+	}
 	u, err := s.repo.GetUser(ctx, id)
 	if err != nil {
 		return UserDTO{}, mapStore(err)
@@ -1795,9 +1807,20 @@ func (s *Service) UpdateUser(ctx context.Context, id string, in SaveUserInput, a
 	if u.ID == actor.ID && !in.Enabled {
 		return UserDTO{}, ErrConflict
 	}
+	// Validate every credential field before changing the account or its sessions.
+	if in.Password != "" {
+		hash, e := s.auth.HashPassword(in.Password)
+		if e != nil {
+			return UserDTO{}, fmt.Errorf("%w: %v", ErrBadRequest, e)
+		}
+		u.PasswordHash = hash
+	}
 	u.Username = strings.TrimSpace(in.Username)
 	u.DisplayName = strings.TrimSpace(in.DisplayName)
 	u.Role = in.Role
+	if err = s.prepareTwoFactor(&u, u.ID, in, actor); err != nil {
+		return UserDTO{}, err
+	}
 	disabling := u.Active && !in.Enabled
 	if disabling {
 		if err = s.repo.RevokeUserSessions(ctx, u.ID); err != nil {
@@ -1807,15 +1830,6 @@ func (s *Service) UpdateUser(ctx context.Context, id string, in SaveUserInput, a
 	u.Active = in.Enabled
 	if err = s.repo.UpdateUser(ctx, u); err != nil {
 		return UserDTO{}, mapStore(err)
-	}
-	if in.Password != "" {
-		hash, e := s.auth.HashPassword(in.Password)
-		if e != nil {
-			return UserDTO{}, fmt.Errorf("%w: %v", ErrBadRequest, e)
-		}
-		if e = s.repo.UpdatePasswordAndRevoke(ctx, u.ID, hash); e != nil {
-			return UserDTO{}, e
-		}
 	}
 	_ = s.repo.Audit(ctx, &actor.ID, "user.update", "user", u.ID, ip, nil)
 	u, err = s.repo.GetUser(ctx, id)

@@ -2,7 +2,7 @@ import { reactive, readonly } from 'vue'
 import type { Router } from 'vue-router'
 import { authApi } from '@/api/auth'
 import { tokenSession } from '@/api/http'
-import type { AuthUser, LoginPayload } from '@/types/api'
+import type { AuthUser, LoginPayload, LoginResponse, LoginResult, TwoFactorLoginPayload } from '@/types/api'
 import { currentAdminPath } from '@/utils/admin-path'
 
 interface AuthState {
@@ -49,11 +49,26 @@ async function hydrate(): Promise<boolean> {
   return hydratePromise
 }
 
-async function login(payload: LoginPayload): Promise<AuthUser> {
-  const result = await authApi.login(payload)
+function acceptLogin(result: LoginResponse): void {
   tokenSession.set(result.token)
   state.user = result.user
   state.hydrated = true
+}
+
+async function login(payload: LoginPayload): Promise<LoginResult> {
+  const result = await authApi.login(payload)
+  // 验证密码后返回的 challenge 仅代表还需验证，不是已登录会话。
+  if ('twoFactorRequired' in result) {
+    clear()
+  } else {
+    acceptLogin(result)
+  }
+  return result
+}
+
+async function verifyTwoFactor(payload: TwoFactorLoginPayload): Promise<AuthUser> {
+  const result = await authApi.verifyTwoFactor(payload)
+  acceptLogin(result)
   return result.user
 }
 
@@ -63,9 +78,7 @@ async function logout(): Promise<void> {
   } catch {
     // 即使服务端会话已失效或网络中断，也必须完成本地退出。
   } finally {
-    tokenSession.clear()
-    state.user = null
-    state.hydrated = true
+    clear()
   }
 }
 
@@ -89,6 +102,7 @@ export const authSession = {
   hasToken: () => Boolean(tokenSession.get()),
   hydrate,
   login,
+  verifyTwoFactor,
   logout,
   clear,
   bindUnauthorizedHandler,

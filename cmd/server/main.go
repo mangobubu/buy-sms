@@ -43,7 +43,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	authentication := auth.New(repo, cfg.SessionPepper, cfg.AdminPath, cfg.CaptchaTTL, cfg.SessionTTL)
+	authentication := auth.New(repo, cfg.SessionPepper, cfg.AdminPath, cfg.CaptchaTTL, cfg.SessionTTL, vault)
 	app := application.New(repo, authentication, vault, cfg)
 	if err = app.Bootstrap(startup); err != nil {
 		return err

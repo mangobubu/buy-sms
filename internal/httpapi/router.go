@@ -49,6 +49,7 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	api := r.Group("/api")
 	api.GET("/public/captcha", h.captcha)
 	api.POST("/public/login", h.login)
+	api.POST("/public/login/two-factor", h.loginTwoFactor)
 	api.POST("/webhooks/:provider/:token", h.webhook)
 	authed := api.Group("")
 	authed.Use(noStore(), h.authenticate())
@@ -75,6 +76,8 @@ func New(app *application.Service, authentication *auth.Service, cfg config.Conf
 	authed.POST("/orders/:id/renew", h.renewOrder)
 	authed.GET("/users", h.requireAdmin(), h.users)
 	authed.POST("/users", h.requireAdmin(), h.createUser)
+	authed.POST("/users/two-factor/setup", h.requireAdmin(), h.twoFactorSetup)
+	authed.GET("/users/:id/two-factor", h.requireAdmin(), h.userTwoFactorDetails)
 	authed.PUT("/users/:id", h.requireAdmin(), h.updateUser)
 	r.NoMethod(func(c *gin.Context) { notFound(c) })
 	r.NoRoute(h.frontend)
@@ -505,6 +508,9 @@ func currentUser(c *gin.Context) domain.User {
 	return u
 }
 func respondError(c *gin.Context, err error) {
+	if respondTwoFactorError(c, err) {
+		return
+	}
 	var actionErr *application.OrderActionError
 	if errors.As(err, &actionErr) {
 		status := http.StatusBadGateway

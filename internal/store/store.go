@@ -10,8 +10,11 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("记录不存在")
-	ErrConflict = errors.New("记录已存在")
+	ErrNotFound         = errors.New("记录不存在")
+	ErrConflict         = errors.New("记录已存在")
+	ErrChallengeExpired = errors.New("二次验证已过期，请重新登录")
+	ErrChallengeLimited = errors.New("二次验证尝试过于频繁，请重新登录")
+	ErrCodeUsed         = errors.New("验证码已使用，请等待下一个验证码")
 )
 
 type Repository interface {
@@ -30,6 +33,9 @@ type Repository interface {
 	UpdateUser(context.Context, domain.User) error
 	UpdatePassword(context.Context, string, string) error
 	UpdatePasswordAndRevoke(context.Context, string, string) error
+	CreateTwoFactorChallenge(context.Context, domain.TwoFactorChallenge) error
+	ReserveTwoFactorChallenge(context.Context, []byte, string, time.Time, int) (domain.TwoFactorChallenge, domain.User, error)
+	RedeemTwoFactorChallenge(context.Context, []byte, string, int64, int64, domain.Session, time.Time) (domain.User, error)
 	CreateSession(context.Context, domain.Session) error
 	FindSession(context.Context, []byte, time.Time) (domain.User, error)
 	RevokeUserSessions(context.Context, string) error

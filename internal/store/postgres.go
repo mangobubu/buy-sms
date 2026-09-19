@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -132,14 +133,14 @@ func (s *Postgres) RecordLoginAttempt(ctx context.Context, ip, user string, succ
 
 func scanUser(row pgx.Row) (domain.User, error) {
 	var u domain.User
-	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Role, &u.Active, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Username, &u.DisplayName, &u.PasswordHash, &u.Role, &u.Active, &u.LastLoginAt, &u.CreatedAt, &u.UpdatedAt, &u.TwoFactorEnabled, &u.TwoFactorSecretCipher, &u.TwoFactorLastStep, &u.AuthVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = ErrNotFound
 	}
 	return u, err
 }
 
-const userCols = `id,username,display_name,password_hash,role,active,last_login_at,created_at,updated_at`
+const userCols = `id,username,display_name,password_hash,role,active,last_login_at,created_at,updated_at,two_factor_enabled,two_factor_secret_cipher,two_factor_last_step,auth_version`
 
 func (s *Postgres) FindUserByUsername(ctx context.Context, name string) (domain.User, error) {
 	return scanUser(s.pool.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE username_normalized=$1`, strings.ToLower(strings.TrimSpace(name))))
@@ -164,28 +165,62 @@ func (s *Postgres) ListUsers(ctx context.Context) ([]domain.User, error) {
 	return out, rows.Err()
 }
 func (s *Postgres) CreateUser(ctx context.Context, u domain.User) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO users(id,username,username_normalized,display_name,password_hash,role,active) VALUES($1,$2,$3,$4,$5,$6,$7)`, u.ID, u.Username, strings.ToLower(strings.TrimSpace(u.Username)), u.DisplayName, u.PasswordHash, u.Role, u.Active)
+	step := int64(-1)
+	if u.TwoFactorEnabled {
+		step = u.TwoFactorLastStep
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO users(id,username,username_normalized,display_name,password_hash,role,active,two_factor_enabled,two_factor_secret_cipher,two_factor_last_step) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, u.ID, u.Username, strings.ToLower(strings.TrimSpace(u.Username)), u.DisplayName, u.PasswordHash, u.Role, u.Active, u.TwoFactorEnabled, u.TwoFactorSecretCipher, step)
 	if unique(err) {
 		return ErrConflict
 	}
 	return err
 }
+
+// Profile, credentials, 2FA configuration and session revocation commit together.
 func (s *Postgres) UpdateUser(ctx context.Context, u domain.User) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE users SET username=$2,username_normalized=$3,display_name=$4,role=$5,active=$6,updated_at=now() WHERE id=$1`, u.ID, u.Username, strings.ToLower(strings.TrimSpace(u.Username)), u.DisplayName, u.Role, u.Active)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	previous, err := scanUser(tx.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE id=$1 FOR UPDATE`, u.ID))
+	if err != nil {
+		return err
+	}
+	if previous.AuthVersion != u.AuthVersion {
+		return ErrConflict
+	}
+	if !u.TwoFactorEnabled {
+		u.TwoFactorSecretCipher = nil
+		u.TwoFactorLastStep = -1
+	}
+	if u.TwoFactorEnabled && len(u.TwoFactorSecretCipher) == 0 {
+		return ErrConflict
+	}
+	secretChanged := !bytes.Equal(previous.TwoFactorSecretCipher, u.TwoFactorSecretCipher)
+	securityChanged := previous.PasswordHash != u.PasswordHash || previous.Username != u.Username || previous.Role != u.Role || previous.Active != u.Active || previous.TwoFactorEnabled != u.TwoFactorEnabled || secretChanged
+	if !secretChanged && previous.TwoFactorEnabled == u.TwoFactorEnabled {
+		u.TwoFactorLastStep = previous.TwoFactorLastStep
+	}
+	if securityChanged {
+		u.AuthVersion++
+	}
+	_, err = tx.Exec(ctx, `UPDATE users SET username=$2,username_normalized=$3,display_name=$4,password_hash=$5,role=$6,active=$7,two_factor_enabled=$8,two_factor_secret_cipher=$9,two_factor_last_step=$10,auth_version=$11,updated_at=now() WHERE id=$1`, u.ID, u.Username, strings.ToLower(strings.TrimSpace(u.Username)), u.DisplayName, u.PasswordHash, u.Role, u.Active, u.TwoFactorEnabled, u.TwoFactorSecretCipher, u.TwoFactorLastStep, u.AuthVersion)
 	if unique(err) {
 		return ErrConflict
 	}
-	if err == nil && ct.RowsAffected() == 0 {
-		return ErrNotFound
+	if err != nil {
+		return err
 	}
-	return err
+	if securityChanged {
+		if _, err = tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, u.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 func (s *Postgres) UpdatePassword(ctx context.Context, id, hash string) error {
-	ct, err := s.pool.Exec(ctx, `UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1`, id, hash)
-	if err == nil && ct.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return err
+	return s.UpdatePasswordAndRevoke(ctx, id, hash)
 }
 func (s *Postgres) UpdatePasswordAndRevoke(ctx context.Context, id, hash string) error {
 	tx, err := s.pool.Begin(ctx)
@@ -193,7 +228,7 @@ func (s *Postgres) UpdatePasswordAndRevoke(ctx context.Context, id, hash string)
 		return err
 	}
 	defer tx.Rollback(ctx)
-	ct, err := tx.Exec(ctx, `UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1`, id, hash)
+	ct, err := tx.Exec(ctx, `UPDATE users SET password_hash=$2,auth_version=auth_version+1,updated_at=now() WHERE id=$1`, id, hash)
 	if err != nil {
 		return err
 	}
@@ -206,11 +241,32 @@ func (s *Postgres) UpdatePasswordAndRevoke(ctx context.Context, id, hash string)
 	return tx.Commit(ctx)
 }
 func (s *Postgres) CreateSession(ctx context.Context, x domain.Session) error {
-	_, err := s.pool.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,token_hash,ip,user_agent,expires_at) VALUES($1,$2,$3,NULLIF($4,'')::inet,$5,$6)`, x.ID, x.UserID, x.TokenHash, x.IP, x.UserAgent, x.ExpiresAt)
+	// The user row lock serializes issuance with credential changes and revocation.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var id string
+	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 AND active AND NOT two_factor_enabled AND auth_version=$2 FOR UPDATE`, x.UserID, x.AuthVersion).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err = insertSession(ctx, tx, x); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func insertSession(ctx context.Context, tx pgx.Tx, x domain.Session) error {
+	_, err := tx.Exec(ctx, `INSERT INTO auth_sessions(id,user_id,token_hash,ip,user_agent,expires_at) VALUES($1,$2,$3,NULLIF($4,'')::inet,$5,$6)`, x.ID, x.UserID, x.TokenHash, x.IP, x.UserAgent, x.ExpiresAt)
 	return err
 }
 func (s *Postgres) FindSession(ctx context.Context, h []byte, now time.Time) (domain.User, error) {
-	return scanUser(s.pool.QueryRow(ctx, `SELECT u.id,u.username,u.display_name,u.password_hash,u.role,u.active,u.last_login_at,u.created_at,u.updated_at FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND u.active`, h, now))
+	return scanUser(s.pool.QueryRow(ctx, `SELECT u.id,u.username,u.display_name,u.password_hash,u.role,u.active,u.last_login_at,u.created_at,u.updated_at,u.two_factor_enabled,u.two_factor_secret_cipher,u.two_factor_last_step,u.auth_version FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>$2 AND u.active`, h, now))
 }
 func (s *Postgres) RevokeUserSessions(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, id)
@@ -1138,6 +1194,7 @@ func maintenanceStatements(now time.Time) []maintenanceStatement {
 	return []maintenanceStatement{
 		{`WITH stale AS (UPDATE renewal_requests SET status='failed',error_code='abandoned_before_submit',updated_at=now() WHERE status='provisioning' AND submitted_at IS NULL AND updated_at<$1 RETURNING id) UPDATE orders SET renewal_request_id=NULL,renewal_inflight=false,renewal_inflight_at=NULL,renewal_mode='',renewal_value=0,renewal_unit='',renewal_quoted_price=0,renewal_baseline='',renewal_submitted_at=NULL,updated_at=now() WHERE renewal_request_id IN (SELECT id FROM stale)`, now.Add(-2 * time.Minute)},
 		{`DELETE FROM captcha_challenges WHERE expires_at<$1`, now.Add(-time.Hour)},
+		{`DELETE FROM two_factor_challenges WHERE expires_at<$1`, now.Add(-time.Hour)},
 		{`DELETE FROM captcha_issuances WHERE issued_at<$1`, now.Add(-24 * time.Hour)},
 		{`DELETE FROM auth_sessions WHERE expires_at<$1 OR revoked_at<$1`, now.Add(-7 * 24 * time.Hour)},
 		{`DELETE FROM login_attempts WHERE attempted_at<$1`, now.Add(-7 * 24 * time.Hour)},

@@ -237,6 +237,8 @@ func TestRenewOrderUsesHeroAPIQuoteAndChargedPrice(t *testing.T) {
 			Cost: 1, Currency: "USD"},
 	}
 	service := newRenewalService(t, repo)
+	// Keep the submission clock aligned with the fixed provider history fixture.
+	service.now = func() time.Time { return time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC) }
 	user := domain.User{ID: "user-1", Role: "operator"}
 
 	quote, err := service.RenewalOptions(context.Background(), "order-1", user)

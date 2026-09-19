@@ -11,6 +11,24 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_enabled boolean NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_secret_cipher bytea;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS two_factor_last_step bigint NOT NULL DEFAULT -1;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version bigint NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS two_factor_challenges (
+    token_hash bytea PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ip inet NOT NULL,
+    auth_version bigint NOT NULL,
+    login_attempt_id bigint NOT NULL,
+    attempts integer NOT NULL DEFAULT 0,
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS two_factor_challenges_expiry ON two_factor_challenges(expires_at);
+
 CREATE TABLE IF NOT EXISTS auth_sessions (
     id uuid PRIMARY KEY,
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,

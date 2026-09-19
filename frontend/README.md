@@ -35,7 +35,8 @@ npm run build
 | 方法 | 路径 | 约定 |
 | --- | --- | --- |
 | GET | `/public/captcha` | `{ id, image }`，`image` 为 data URL；验证码比较不区分大小写 |
-| POST | `/public/login` | body `{ username, password, captchaId, captcha, adminPath }`；返回 `{ token, user, expiresAt? }` |
+| POST | `/public/login` | body `{ username, password, captchaId, captcha, adminPath }`；未开启 2FA 返回 `{ token, user, expiresAt? }`，已开启则返回 `{ twoFactorRequired: true, challengeToken, expiresAt }` |
+| POST | `/public/login/two-factor` | body `{ challengeToken, code, adminPath }`；成功后返回 `{ token, user, expiresAt }` |
 | GET | `/auth/me` | 当前用户 |
 | POST | `/auth/logout` | 注销当前会话 |
 | POST | `/auth/change-password` | body `{ currentPassword, newPassword }` |
@@ -65,9 +66,18 @@ npm run build
 | POST | `/orders/:id/cancel` | 取消号码 |
 
 取消能力以订单接口返回的 `canCancel`、`cancelAvailableAt`、`cancelWaitSeconds` 和 `cancelUnavailableReason` 为准。HeroSMS 标准号码购买满 2 分钟后可取消；HeroSMS 长期号码还须处于购买后 20 分钟内。SMSBower 根据当前实际接口行为允许购买后立即尝试取消，SMSPool 的短暂锁定时长由供应商动态裁决；两者若被上游暂时拒绝，接口会返回可重试提示。任何平台在已收到短信、订单终结或号码过期后均关闭取消入口。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
 | GET | `/users` | 用户列表 |
 | POST | `/users` | 创建用户 |
 | PUT | `/users/:id` | 更新用户 |
+| POST | `/users/two-factor/setup` | 管理员创建绑定信息；body `{ username, userId? }`，返回 `{ secret, otpauthUrl, setupToken, expiresAt }` |
+| GET | `/users/:id/two-factor` | 管理员按需查看已开启账户的 `{ secret, otpauthUrl }` |
+
+用户创建、编辑请求可带 `twoFactorEnabled`。为未开启的账户启用时，先生成绑定信息，再提交 `twoFactorSetupToken` 和 `twoFactorCode`，服务端验证后生效。省略开关时保留已有状态；已开启账户保持开启时无需重新绑定。二维码通过 `qrcode` 在本地生成，旁边展示密钥和复制按钮；绑定信息只保存在当前弹窗内存中，关闭时清理。更改用户名会清除待提交的绑定信息，需要重新生成。
+
+登录挑战只用于第二步验证，不写入登录态。第二步 `two_factor_invalid` 可保留挑战重试，`two_factor_expired` 返回密码登录；完整登录成功后才保存会话。本人 2FA 开关改变并保存成功时，前端会清理会话并返回登录页。
 
 供应商规范代码为 `herosms`、`smsbower`、`smspool`、`smspin`（SMSPin）。完整 DTO 位于 `src/types/api.ts`。
 SMSBower 普通完成返回 `complete_status_conflict` 后，已满 25 分钟且本次激活收到过短信的订单可展示“本地结束”确认框。用户必须勾选已在供应商后台确认号码不存在；服务端仍会在订单锁内重新校验资格和供应商状态。只有 `BAD_STATUS` 且确认状态为 `received` 的业务拒绝可本地结束，等待短信、鉴权失败或超时等不允许绕过。订单返回的 `localCompleted` 标识用于区分人工本地结束与供应商确认终态；本地结束保留短信、金额和审计，不代表远端完成或退款。
