@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import axios from 'axios'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Check, Refresh, ShoppingCart } from '@element-plus/icons-vue'
@@ -68,8 +68,10 @@ const UNCERTAIN_PURCHASE_FAILURE_CODES = new Set([
 ])
 const providers = ref<ProviderConfig[]>([])
 const providerBalances = ref<Partial<Record<ProviderCode, ProviderBalance>>>({})
-const countries = ref<CountryOption[]>([])
-const services = ref<ServiceOption[]>([])
+// Catalog responses replace the whole list; individual entries are never mutated.
+const countries = shallowRef<CountryOption[]>([])
+const services = shallowRef<ServiceOption[]>([])
+const catalogSelectProps = { label: 'name', value: 'code' }
 const durationOptions = ref<DurationOption[]>([])
 const quotes = ref<Quote[]>([])
 const smsBowerTiers: { value: SmsBowerTier; label: string }[] = [
@@ -1217,35 +1219,42 @@ onBeforeUnmount(() => {
           </el-form-item>
 
           <el-form-item label="接码服务" prop="serviceCode">
-            <el-select
+            <!-- Large catalogs must only mount the visible options when switching providers. -->
+            <el-select-v2
+              :key="form.provider"
               v-model="form.serviceCode"
+              :options="services"
+              :props="catalogSelectProps"
               filterable
               :loading="loadingServices"
               :disabled="purchasing || !form.provider || restoringProviderSelection"
               placeholder="请先选择接码服务"
               style="width: 100%"
             >
-              <el-option v-for="service in services" :key="service.code" :label="service.name" :value="service.code">
+              <template #default="{ item: service }">
                 <span class="select-option-main">{{ service.name }}</span>
                 <small v-if="service.available !== undefined">{{ service.available }} 个可用</small>
-              </el-option>
-            </el-select>
+              </template>
+            </el-select-v2>
           </el-form-item>
 
           <el-form-item label="国家或地区" prop="countryCode">
-            <el-select
+            <el-select-v2
+              :key="`${form.provider}:${form.serviceCode}`"
               v-model="form.countryCode"
+              :options="countries"
+              :props="catalogSelectProps"
               filterable
               :loading="loadingCountries"
               :disabled="purchasing || !form.serviceCode || restoringProviderSelection"
               placeholder="请先选择服务，再选择国家或地区"
               style="width: 100%"
             >
-              <el-option v-for="country in countries" :key="country.code" :label="country.name" :value="country.code">
+              <template #default="{ item: country }">
                 <span class="select-option-main">{{ country.flag }} {{ country.name }}</span>
                 <small v-if="country.available !== undefined">{{ country.available }} 个可用</small>
-              </el-option>
-            </el-select>
+              </template>
+            </el-select-v2>
           </el-form-item>
 
           <el-form-item v-if="form.provider === 'herosms'" label="购买时长" prop="duration">
